@@ -182,11 +182,15 @@ def process_single_video(
     # Step 2: Open video and process frames
     cap = cv2.VideoCapture(str(video_path))
     fps = cap.get(cv2.CAP_PROP_FPS)
+    frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     total_frames_to_process = (last_frame - first_frame) // FRAME_SKIP
     
     if debug_dir:
+        console.print(f"[yellow]→[/yellow] Video resolution: {frame_width}x{frame_height}")
         console.print(f"[yellow]→[/yellow] Processing frames with skip={FRAME_SKIP}...")
         console.print(f"[yellow]→[/yellow] Expected frames: {total_frames_to_process}")
+        console.print(f"[yellow]→[/yellow] HP detection: ON ORIGINAL RESOLUTION (before resize to {OUTPUT_RESOLUTION})")
     
     # Initialize result lists
     video_ids = []
@@ -195,7 +199,7 @@ def process_single_video(
     boss_hps = []
     player_hps = []
     
-    # Get player max HP from first valid frame
+    # Get player max HP from first valid frame (within boundaries)
     player_max_hp_extent = None
     cap.set(cv2.CAP_PROP_POS_FRAMES, first_frame)
     ret, first_frame_img = cap.read()
@@ -204,6 +208,8 @@ def process_single_video(
         player_max_hp_extent = first_result['player']['right_edge']
         if debug_dir:
             console.print(f"[green]✓[/green] Player max HP extent: {player_max_hp_extent} pixels")
+            console.print(f"[green]✓[/green] First frame boss HP: {first_result['boss']['hp']:.1%}")
+            console.print(f"[green]✓[/green] First frame player HP: {first_result['player']['hp']:.1%}")
     
     # Create debug directory for this video if needed
     video_debug_dir = None
@@ -229,15 +235,17 @@ def process_single_video(
             current_frame_num += FRAME_SKIP
             continue
         
-        # Detect HP
+        # STEP 1: Detect HP on ORIGINAL RESOLUTION frame (e.g., 1920x1080)
+        # This ensures accurate HP bar pixel detection
         hp_result = detect_all_hp(frame, player_max_hp_extent)
         boss_hp = hp_result['boss']['hp']
         player_hp = hp_result['player']['hp']
         
-        # Resize frame
+        # STEP 2: Resize frame to output resolution for storage (256x144)
+        # HP values are already extracted, this is just for visual data
         resized_frame = cv2.resize(frame, OUTPUT_RESOLUTION, interpolation=cv2.INTER_AREA)
         
-        # Convert BGR to RGB for consistency with typical ML pipelines
+        # STEP 3: Convert BGR to RGB for consistency with ML pipelines
         resized_frame_rgb = cv2.cvtColor(resized_frame, cv2.COLOR_BGR2RGB)
         
         # Append to lists
@@ -254,10 +262,12 @@ def process_single_video(
             debug_path = video_debug_dir / f"frame_{sequential_idx:06d}.jpg"
             cv2.imwrite(str(debug_path), debug_frame)
             
-            if sequential_idx % 100 == 0:
+            # Print every 50 frames for more visibility
+            if sequential_idx % 50 == 0:
                 console.print(
-                    f"  Frame {sequential_idx}: "
-                    f"Boss={boss_hp:.1%}, Player={player_hp:.1%}"
+                    f"  Frame {sequential_idx} (orig frame {current_frame_num}): "
+                    f"Boss={boss_hp:.1%} (edge={hp_result['boss']['right_edge']}px), "
+                    f"Player={player_hp:.1%} (edge={hp_result['player']['right_edge']}px)"
                 )
         
         # Update progress

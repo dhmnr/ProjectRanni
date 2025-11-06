@@ -215,4 +215,7 @@ __marimo__/
 # Streamlit
 .streamlit/secrets.toml
 
+.cursor/
 data/
+
+recordings/
