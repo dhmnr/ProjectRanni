@@ -574,7 +574,20 @@ class GameplayRecorder:
         upload_cfg = upload_config or {"enabled": False}
 
         results = []
-        episode_count = 0
+        
+        # Load episode counter from persistent storage
+        output_dir = Path(output_directory)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        counter_file = output_dir / ".episode_counter"
+        
+        if counter_file.exists():
+            try:
+                episode_count = int(counter_file.read_text().strip())
+                console.print(f"[dim]Resuming from episode {episode_count + 1}[/dim]")
+            except (ValueError, IOError):
+                episode_count = 0
+        else:
+            episode_count = 0
 
         console.print("\n[bold cyan]Starting endless recording mode...[/bold cyan]")
         console.print(f"  Max episodes: {max_episodes or 'unlimited'}")
@@ -612,9 +625,6 @@ class GameplayRecorder:
                     console.print("[green]No start condition - starting immediately[/green]")
 
                 # Start recording
-                output_dir = Path(output_directory)
-                output_dir.mkdir(parents=True, exist_ok=True)
-
                 result = self.client.start_recording(
                     attribute_names=attribute_names,
                     output_directory=str(output_dir),
@@ -630,13 +640,14 @@ class GameplayRecorder:
 
                 # Track which stop condition was met and its reset method
                 met_reset_method = None
+                met_condition_index = None
                 
                 try:
                     while True:
                         elapsed = time.time() - start_time
 
                         # Check all stop conditions (OR logic)
-                        for stop_cond_info in stop_conds:
+                        for idx, stop_cond_info in enumerate(stop_conds):
                             cond = stop_cond_info["condition"]
                             if self.check_condition(
                                 condition_type=cond["type"],
@@ -646,7 +657,8 @@ class GameplayRecorder:
                             ):
                                 cond_str = self._format_condition(cond)
                                 met_reset_method = stop_cond_info["reset_method"]
-                                console.print(f"\n[yellow]Stop condition met: {cond_str} (reset: {met_reset_method})[/yellow]")
+                                met_condition_index = idx
+                                console.print(f"\n[yellow]Stop condition {idx} met: {cond_str} (reset: {met_reset_method})[/yellow]")
                                 break
                         
                         # Exit if any stop condition was met
@@ -658,6 +670,7 @@ class GameplayRecorder:
                             console.print("\n[yellow]Max episode duration reached[/yellow]")
                             # Use first reset method if timeout
                             met_reset_method = stop_conds[0]["reset_method"] if stop_conds else "save_reload"
+                            met_condition_index = 0 if stop_conds else None
                             break
 
                         # Show preview
@@ -693,19 +706,24 @@ class GameplayRecorder:
                 console.print(f"  Duration: {stats.get('duration_seconds', stats.get('duration', 0)):.2f}s")
                 console.print(f"  FPS: {stats.get('actual_fps', stats.get('fps', 0)):.2f}")
 
-                # Download recording
-                output_filename = f"episode_{episode_count:04d}_{session_id}_{int(time.time())}.h5"
+                # Download recording with condition index in filename
+                cond_suffix = f"_cond{met_condition_index}" if met_condition_index is not None else ""
+                output_filename = f"episode_{episode_count:04d}{cond_suffix}_{session_id}_{int(time.time())}.h5"
                 output_path = output_dir / output_filename
 
                 console.print(f"[cyan]Downloading to {output_path}...[/cyan]")
                 self.client.download_recording(session_id, str(output_path))
                 console.print(f"[green]✓ Saved to {output_path}[/green]")
 
+                # Save episode counter for next session
+                counter_file.write_text(str(episode_count))
+
                 episode_result = {
                     "episode": episode_count,
                     "session_id": session_id,
                     "file_path": str(output_path),
                     "stats": stats,
+                    "stop_condition_index": met_condition_index,
                 }
                 results.append(episode_result)
 
