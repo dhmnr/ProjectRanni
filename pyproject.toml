@@ -4,11 +4,29 @@ version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.10"
-dependencies = [
+dependencies = []
+
+[dependency-groups]
+yt_data_pipeline = [
     "easyocr>=1.7.0",
+    "h5py>=3.15.1",
+    "matplotlib>=3.7.0",
     "numpy<2.0",
     "opencv-python>=4.8.0,<5.0",
     "pillow>=12.0.0",
     "rich>=13.0.0",
     "yt-dlp>=2025.10.22",
 ]
+gameplay_pipeline = [
+    "pysiphon>=1.0.1",
+    "pillow>=12.0.0",
+    "rich>=13.0.0",
+    "huggingface-hub>=1.0.1",
+    "tomli>=2.0.0; python_version < '3.11'",
+]
+dev = [
+    "ipykernel>=7.1.0",
+]
+
+[tool.uv]
+default-groups = ["yt_data_pipeline", "gameplay_pipeline", "dev"]

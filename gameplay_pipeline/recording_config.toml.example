@@ -1,0 +1,175 @@
+# Recording Configuration File
+# This file defines recording settings for gameplay episodes
+# Copy this to recording_config.toml and customize for your needs
+
+[server]
+host = "localhost:50051"
+
+[recording]
+output_directory = "./recordings"
+max_episode_duration = 300  # Maximum seconds per episode
+show_preview = true
+
+[upload]
+enabled = false  # Set to true to auto-upload to Hugging Face
+repo_id = "username/elden-ring-gameplay"
+# hf_token can be set via environment variable HF_TOKEN or passed via CLI
+
+# ==============================================================================
+# STOP CONDITIONS FORMAT
+# ==============================================================================
+# Each episode can have multiple stop conditions (OR logic between them).
+# Each stop condition has its own reset method:
+#
+# stop_conditions = [
+#     { condition = "HeroHp <= 0", reset_method = "save_reload" },  # Player dies
+#     { condition = "NpcHp <= 0", reset_method = "bonfire" }        # Boss dies
+# ]
+#
+# When ANY condition is met, recording stops and uses that condition's reset method.
+# Reset methods:
+#   - "save_reload": Full game quit + save file reload (20s) - for boss fights
+#   - "bonfire": Quick respawn at Site of Grace (3s) - for exploration
+#
+# ==============================================================================
+# SAVE FILE COPYING (for save_reload reset)
+# ==============================================================================
+# You can specify save file settings to automatically copy during save_reload resets:
+#
+# save_file_name = "backup_save.sl2"
+# save_file_dir = "C:\\Users\\YourName\\AppData\\Roaming\\EldenRing\\<SteamID>"
+#
+# This allows perfect reset loops - create a backup save at the exact position you want
+# to reset to, and it will be automatically copied over the active save (ER0000.sl2)
+# when the save_reload reset method triggers.
+
+# ==============================================================================
+# BOSS FIGHT EPISODES
+# ==============================================================================
+
+[episodes.margit]
+name = "margit_boss_fight"
+description = "Recording Margit the Fell Omen boss fight in Stormveil Castle"
+attributes = [
+    "HeroHp", "HeroMaxHp", 
+    "HeroSp", "HeroMaxSp", 
+    "HeroFp", "HeroMaxFp",
+    "HeroGlobalPosX", "HeroGlobalPosY", "HeroGlobalPosZ", "HeroAngle",
+    "HeroAnimId", "HeroAnimSpeed",
+    "NpcHp", "NpcMaxHp", "NpcId",
+    "NpcGlobalPosX", "NpcGlobalPosY", "NpcGlobalPosZ", "NpcGlobalPosAngle",
+    "NpcAnimId"
+]
+start_condition = "HeroHp > 0"  # Start when alive
+
+# Multiple stop conditions with their own reset methods (OR logic between them)
+stop_conditions = [
+    { condition = "HeroHp <= 0", reset_method = "save_reload" },  # Player dies → full reset
+    { condition = "NpcHp <= 0", reset_method = "bonfire" }        # Boss dies → quick respawn
+]
+
+# Optional: Specify save file settings to copy during save_reload resets
+# Create a backup save at your desired starting position (e.g., right before boss fog)
+# save_file_name = "margit_backup.sl2"
+# save_file_dir = "C:\\Users\\YourName\\AppData\\Roaming\\EldenRing\\76561198217475593"
+
+[episodes.godrick]
+name = "godrick_boss_fight"
+description = "Recording Godrick the Grafted boss fight"
+attributes = [
+    "HeroHp", "HeroMaxHp", 
+    "HeroSp", "HeroMaxSp", 
+    "HeroFp", "HeroMaxFp",
+    "HeroGlobalPosX", "HeroGlobalPosY", "HeroGlobalPosZ", "HeroAngle",
+    "HeroAnimId", "HeroAnimSpeed",
+    "NpcHp", "NpcMaxHp", "NpcId",
+    "NpcGlobalPosX", "NpcGlobalPosY", "NpcGlobalPosZ", "NpcGlobalPosAngle",
+    "NpcAnimId"
+]
+start_condition = "HeroHp > 0"
+stop_conditions = [
+    { condition = "HeroHp <= 0", reset_method = "save_reload" },
+    { condition = "NpcHp <= 0", reset_method = "bonfire" }
+]
+# save_file_name = "godrick_backup.sl2"
+# save_file_dir = "C:\\Users\\YourName\\AppData\\Roaming\\EldenRing\\76561198217475593"
+
+[episodes.radahn]
+name = "radahn_boss_fight"
+description = "Recording Starscourge Radahn boss fight"
+attributes = [
+    "HeroHp", "HeroMaxHp", 
+    "HeroSp", "HeroMaxSp", 
+    "HeroFp", "HeroMaxFp",
+    "HeroGlobalPosX", "HeroGlobalPosY", "HeroGlobalPosZ", "HeroAngle",
+    "HeroAnimId", "HeroAnimSpeed",
+    "NpcHp", "NpcMaxHp", "NpcId",
+    "NpcGlobalPosX", "NpcGlobalPosY", "NpcGlobalPosZ", "NpcGlobalPosAngle",
+    "NpcAnimId"
+]
+start_condition = "HeroHp > 0"
+stop_conditions = [
+    { condition = "HeroHp <= 0", reset_method = "save_reload" }
+]
+# save_file_name = "radahn_backup.sl2"
+# save_file_dir = "C:\\Users\\YourName\\AppData\\Roaming\\EldenRing\\76561198217475593"
+
+# ==============================================================================
+# EXPLORATION EPISODES
+# ==============================================================================
+
+[episodes.exploration]
+name = "open_world_exploration"
+description = "General exploration recording with position tracking"
+attributes = [
+    "HeroHp", "HeroMaxHp", 
+    "HeroSp", "HeroMaxSp", 
+    "HeroFp", "HeroMaxFp",
+    "HeroGlobalPosX", "HeroGlobalPosY", "HeroGlobalPosZ", "HeroAngle",
+    "HeroMapId"
+]
+start_condition = "HeroHp > 0"
+stop_conditions = [
+    { condition = "HeroHp <= 0", reset_method = "bonfire" }  # Quick respawn for exploration
+]
+
+# ==============================================================================
+# MINIMAL TEST EPISODE
+# ==============================================================================
+
+[episodes.test]
+name = "test_recording"
+description = "Quick test with minimal attributes"
+attributes = ["HeroHp", "HeroMaxHp", "HeroSp", "HeroMaxSp"]
+start_condition = "HeroHp > 0"
+stop_condition = "HeroHp < 50"
+
+# ==============================================================================
+# NO CONDITIONS EXAMPLE - Start immediately, record until interrupted
+# ==============================================================================
+
+[episodes.free_play]
+name = "free_play"
+description = "Free play recording - starts immediately and runs until you stop it (Ctrl+C)"
+attributes = ["HeroHp", "HeroMaxHp", "HeroSp", "HeroMaxSp", "HeroFp", "HeroMaxFp"]
+# No start_condition = starts immediately
+# No stop_condition = runs until interrupted or max duration
+
+# ==============================================================================
+# COMPOUND CONDITIONS - Using && (AND) and || (OR)
+# ==============================================================================
+
+[episodes.boss_or_player_death]
+name = "boss_or_player_death"
+description = "Stop when either player dies OR boss dies"
+attributes = ["HeroHp", "HeroMaxHp", "NpcHp", "NpcMaxHp", "NpcId"]
+start_condition = "HeroHp > 0"
+stop_condition = "HeroHp <= 0 || NpcHp <= 0"  # Either dies
+
+[episodes.specific_boss_alive]
+name = "specific_boss_with_health"
+description = "Only record when specific NPC ID present AND player has health"
+attributes = ["HeroHp", "NpcId", "NpcHp"]
+start_condition = "HeroHp > 0 && NpcId == 12345"  # Both conditions must be true
+stop_condition = "HeroHp <= 0 || NpcHp <= 0"
+

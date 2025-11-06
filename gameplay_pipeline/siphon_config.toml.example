@@ -1,0 +1,54 @@
+# Example Siphon Configuration File
+# Copy this to siphon_config.toml and customize for your game
+
+# Game process configuration
+[process]
+name = "eldenring.exe"  # or "Game.exe", etc.
+# wait_timeout = 10.0  # Optional: seconds to wait for process
+
+# Memory attributes to track
+# These will be available for recording and monitoring
+[[attributes]]
+name = "health"
+address = 0x12345678  # Replace with actual memory address
+type = "int"
+size = 4
+
+[[attributes]]
+name = "max_health"
+address = 0x12345680
+type = "int"
+size = 4
+
+[[attributes]]
+name = "stamina"
+address = 0x12345688
+type = "float"
+size = 4
+
+[[attributes]]
+name = "position"
+address = 0x12345690
+type = "array"
+size = 12  # 3 floats (x, y, z)
+
+[[attributes]]
+name = "player_level"
+address = 0x123456A0
+type = "int"
+size = 4
+
+# Screen capture settings
+[capture]
+# width = 1920
+# height = 1080
+# format = "RGB"
+
+# Recording settings
+[recording]
+fps = 30
+# compression = "lz4"
+# quality = 95
+
+
+

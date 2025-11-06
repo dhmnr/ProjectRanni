@@ -1,0 +1,42 @@
+# Recording Configuration File
+# This file defines recording settings for gameplay episodes
+# Copy this to recording_config.toml and customize for your needs
+
+[server]
+host = "localhost:50051"
+
+[recording]
+output_directory = "./recordings"
+max_episode_duration = 300  # Maximum seconds per episode
+show_preview = true
+
+[upload]
+enabled = false  # Set to true to auto-upload to Hugging Face
+repo_id = "username/elden-ring-gameplay"
+# hf_token can be set via environment variable HF_TOKEN or passed via CLI
+
+# ==============================================================================
+# BOSS FIGHT EPISODES
+# ==============================================================================
+
+[episodes.margit]
+name = "margit"
+description = "Recording Margit the Fell Omen boss fight in Stormveil Castle"
+attributes = [
+    "HeroHp", "HeroMaxHp", 
+    "HeroSp", "HeroMaxSp", 
+    "HeroFp", "HeroMaxFp",
+    "HeroGlobalPosX", "HeroGlobalPosY", "HeroGlobalPosZ", "HeroAngle",
+    "HeroAnimId",
+    "NpcHp", "NpcMaxHp", "NpcId",
+    "NpcGlobalPosX", "NpcGlobalPosY", "NpcGlobalPosZ", "NpcGlobalPosAngle",
+    "NpcAnimId"
+]
+start_condition = "HeroGlobalPosX < 19"  # Start when player enters boss arena
+stop_conditions = [
+    { condition = "HeroHp <= 0", reset_method = "bonfire" },        # Player died → quick respawn
+    { condition = "NpcHp <= 0", reset_method = "save_reload" }      # Boss died → reload save
+]
+# Save file configuration for save_reload reset
+save_file_name = "ER0000.margit.sl2"  # Name of the backup save file
+save_file_dir = "C:\\Users\\DM\\AppData\\Roaming\\EldenRing\\76561198217475593"  # Directory containing saves
