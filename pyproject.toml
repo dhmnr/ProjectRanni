@@ -23,6 +23,8 @@ gameplay_pipeline = [
     "rich>=13.0.0",
     "huggingface-hub>=1.0.1",
     "tomli>=2.0.0; python_version < '3.11'",
+    "pandas>=2.3.3",
+    "seaborn>=0.13.2",
 ]
 dev = [
     "ipykernel>=7.1.0",

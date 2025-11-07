@@ -575,19 +575,13 @@ class GameplayRecorder:
 
         results = []
         
-        # Load episode counter from persistent storage
+        # Create output directory
         output_dir = Path(output_directory)
         output_dir.mkdir(parents=True, exist_ok=True)
-        counter_file = output_dir / ".episode_counter"
         
-        if counter_file.exists():
-            try:
-                episode_count = int(counter_file.read_text().strip())
-                console.print(f"[dim]Resuming from episode {episode_count + 1}[/dim]")
-            except (ValueError, IOError):
-                episode_count = 0
-        else:
-            episode_count = 0
+        # Count existing recordings to determine starting episode number for filenames only
+        existing_files = list(output_dir.glob("*.h5"))
+        episode_file_counter = len(existing_files)
 
         console.print("\n[bold cyan]Starting endless recording mode...[/bold cyan]")
         console.print(f"  Max episodes: {max_episodes or 'unlimited'}")
@@ -602,10 +596,9 @@ class GameplayRecorder:
         console.print("[yellow]Press Ctrl+C to stop endless recording[/yellow]\n")
 
         try:
-            while max_episodes is None or episode_count < max_episodes:
-                episode_count += 1
+            while max_episodes is None or len(results) < max_episodes:
                 console.print(f"\n[bold magenta]{'='*60}[/bold magenta]")
-                console.print(f"[bold magenta]Episode {episode_count}[/bold magenta]")
+                console.print(f"[bold magenta]Recording Episode (#{len(results) + 1} this session)[/bold magenta]")
                 console.print(f"[bold magenta]{'='*60}[/bold magenta]\n")
 
                 # Wait for start condition (if specified)
@@ -632,7 +625,7 @@ class GameplayRecorder:
                 )
 
                 session_id = result["session_id"]
-                console.print(f"[green]✓ Recording episode {episode_count} (Session: {session_id})[/green]")
+                console.print(f"[green]✓ Recording started (Session: {session_id})[/green]")
 
                 # Monitor for stop condition or max duration
                 start_time = time.time()
@@ -682,7 +675,7 @@ class GameplayRecorder:
                             attr_str = " | ".join([f"{k}: {v}" for k, v in attrs.items()])
                             
                             console.print(
-                                f"[dim]Episode {episode_count} | Frame {current_frame} | {attr_str} | {elapsed:.1f}s[/dim]",
+                                f"[dim]Frame {current_frame} | {attr_str} | {elapsed:.1f}s[/dim]",
                                 end="\r",
                             )
                             last_status_time = time.time()
@@ -707,23 +700,22 @@ class GameplayRecorder:
                 console.print(f"  FPS: {stats.get('actual_fps', stats.get('fps', 0)):.2f}")
 
                 # Download recording with condition index in filename
+                episode_file_counter += 1
                 cond_suffix = f"_cond{met_condition_index}" if met_condition_index is not None else ""
-                output_filename = f"episode_{episode_count:04d}{cond_suffix}_{session_id}_{int(time.time())}.h5"
+                timestamp = int(time.time() * 1000)  # millisecond precision
+                output_filename = f"episode_{episode_file_counter:04d}{cond_suffix}_{session_id}_{timestamp}.h5"
                 output_path = output_dir / output_filename
 
                 console.print(f"[cyan]Downloading to {output_path}...[/cyan]")
                 self.client.download_recording(session_id, str(output_path))
                 console.print(f"[green]✓ Saved to {output_path}[/green]")
 
-                # Save episode counter for next session
-                counter_file.write_text(str(episode_count))
-
                 episode_result = {
-                    "episode": episode_count,
                     "session_id": session_id,
                     "file_path": str(output_path),
                     "stats": stats,
                     "stop_condition_index": met_condition_index,
+                    "timestamp": timestamp,
                 }
                 results.append(episode_result)
 
@@ -742,9 +734,9 @@ class GameplayRecorder:
                     except Exception as e:
                         console.print(f"[red]Upload failed: {e}[/red]")
 
-                # Reset game for next episode using the appropriate reset method
-                if max_episodes is None or episode_count < max_episodes:
-                    self.reset_game(method=met_reset_method or "save_reload")
+                # Reset game after episode using the appropriate reset method
+                # (even on last episode to ensure consistent state)
+                self.reset_game(method=met_reset_method or "save_reload")
 
         except KeyboardInterrupt:
             console.print("\n[yellow]Endless recording stopped by user[/yellow]")
