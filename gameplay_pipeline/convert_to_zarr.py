@@ -240,13 +240,15 @@ class RecordingToZarrConverter:
         
         return state
     
-    def _load_video_frames(self, video_path: Path, num_frames: int) -> np.ndarray:
+    def _load_video_frames(self, video_path: Path, num_frames: int, progress=None, task_id=None) -> np.ndarray:
         """
         Load video frames as numpy array.
         
         Args:
             video_path: Path to video file
             num_frames: Number of frames to load
+            progress: Rich Progress instance (optional)
+            task_id: Task ID for progress tracking (optional)
             
         Returns:
             Array of shape [num_frames, height, width, channels] as uint8
@@ -277,6 +279,10 @@ class RecordingToZarrConverter:
                 frame = cv2.resize(frame, (target_width, target_height), interpolation=cv2.INTER_AREA)
             
             frames[i] = frame
+            
+            # Update progress if provided
+            if progress and task_id is not None:
+                progress.update(task_id, advance=1)
         
         video_capture.release()
         
@@ -290,7 +296,9 @@ class RecordingToZarrConverter:
         session_idx: int, 
         session_dir: Path,
         zarr_root: zarr.Group,
-        global_metadata: Dict
+        global_metadata: Dict,
+        progress=None,
+        frame_task_id=None
     ) -> bool:
         """
         Convert a single session to zarr format.
@@ -300,6 +308,8 @@ class RecordingToZarrConverter:
             session_dir: Path to session directory
             zarr_root: Zarr root group
             global_metadata: Global metadata dict to update
+            progress: Rich Progress instance (optional)
+            frame_task_id: Task ID for frame progress tracking (optional)
             
         Returns:
             True if successful, False otherwise
@@ -349,10 +359,16 @@ class RecordingToZarrConverter:
                 info['frame_count']
             )
             
+            # Set up frame progress tracking
+            if progress and frame_task_id is not None:
+                progress.update(frame_task_id, total=info['frame_count'], completed=0)
+            
             console.print("  Loading video frames...")
             frames = self._load_video_frames(
                 session_dir / "video.mp4",
-                info['frame_count']
+                info['frame_count'],
+                progress,
+                frame_task_id
             )
             
             # Create episode group
@@ -439,18 +455,32 @@ class RecordingToZarrConverter:
             TimeRemainingColumn(),
             console=console,
         ) as progress:
-            task = progress.add_task(
-                "[cyan]Converting sessions...",
+            # Episode-level progress bar
+            episode_task = progress.add_task(
+                "[cyan]Episodes",
                 total=len(self.sessions)
             )
             
+            # Frame-level progress bar (will be updated for each episode)
+            frame_task = progress.add_task(
+                "[green]Frames (current episode)",
+                total=100
+            )
+            
             for idx, session_dir in enumerate(self.sessions):
-                if self.convert_session(idx, session_dir, zarr_root, global_metadata):
+                if self.convert_session(
+                    idx, 
+                    session_dir, 
+                    zarr_root, 
+                    global_metadata,
+                    progress,
+                    frame_task
+                ):
                     successful += 1
                 else:
                     failed += 1
                 
-                progress.update(task, advance=1)
+                progress.update(episode_task, advance=1)
         
         # Store global metadata
         zarr_root.attrs.update(global_metadata)
