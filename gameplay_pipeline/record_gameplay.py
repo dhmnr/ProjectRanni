@@ -519,17 +519,18 @@ class GameplayRecorder:
         console.print(f"  Duration: {stats.get('duration_seconds', stats.get('duration', 0)):.2f}s")
         console.print(f"  Actual FPS: {stats.get('actual_fps', stats.get('fps', 0)):.2f}")
 
-        # Download recording
-        output_filename = f"recording_{session_id}_{int(time.time())}.h5"
-        output_path = output_dir / output_filename
+        # Download recording (receives multiple files: .h5, .mp4, etc.)
+        # Create session-specific subdirectory
+        session_output_dir = output_dir / session_id
+        session_output_dir.mkdir(parents=True, exist_ok=True)
 
-        console.print(f"[cyan]Downloading recording to {output_path}...[/cyan]")
-        self.client.download_recording(session_id, str(output_path))
-        console.print(f"[green]✓ Recording saved to {output_path}[/green]")
+        console.print(f"[cyan]Downloading recording files to {session_output_dir}...[/cyan]")
+        self.client.download_recording(session_id, str(session_output_dir))
+        console.print(f"[green]✓ Recording files saved to {session_output_dir}/[/green]")
 
         return {
             "session_id": session_id,
-            "file_path": str(output_path),
+            "output_directory": str(session_output_dir),
             "stats": stats,
         }
 
@@ -699,20 +700,27 @@ class GameplayRecorder:
                 console.print(f"  Duration: {stats.get('duration_seconds', stats.get('duration', 0)):.2f}s")
                 console.print(f"  FPS: {stats.get('actual_fps', stats.get('fps', 0)):.2f}")
 
-                # Download recording with condition index in filename
+                # Download recording (receives multiple files: .h5, .mp4, etc.)
                 episode_file_counter += 1
-                cond_suffix = f"_cond{met_condition_index}" if met_condition_index is not None else ""
                 timestamp = int(time.time() * 1000)  # millisecond precision
-                output_filename = f"episode_{episode_file_counter:04d}{cond_suffix}_{session_id}_{timestamp}.h5"
-                output_path = output_dir / output_filename
 
-                console.print(f"[cyan]Downloading to {output_path}...[/cyan]")
-                self.client.download_recording(session_id, str(output_path))
-                console.print(f"[green]✓ Saved to {output_path}[/green]")
+                # Create session-specific subdirectory
+                session_output_dir = output_dir / session_id
+                session_output_dir.mkdir(parents=True, exist_ok=True)
+
+                console.print(f"[cyan]Downloading episode files to {session_output_dir}/ (session: {session_id})...[/cyan]")
+                self.client.download_recording(session_id, str(session_output_dir))
+                console.print(f"[green]✓ Episode files saved to {session_output_dir}/[/green]")
+                
+                # Note: Files are saved with server-generated names (e.g., session_id.h5, session_id.mp4)
+                # The condition index and episode counter are tracked here for reference
+                cond_suffix = f"_cond{met_condition_index}" if met_condition_index is not None else ""
 
                 episode_result = {
                     "session_id": session_id,
-                    "file_path": str(output_path),
+                    "output_directory": str(session_output_dir),
+                    "episode_number": episode_file_counter,
+                    "condition_suffix": cond_suffix,
                     "stats": stats,
                     "stop_condition_index": met_condition_index,
                     "timestamp": timestamp,
@@ -722,15 +730,25 @@ class GameplayRecorder:
                 # Upload if enabled
                 if upload_cfg.get("enabled") and upload_cfg.get("repo_id"):
                     try:
-                        console.print("[cyan]Uploading episode to Hugging Face...[/cyan]")
-                        url = upload_to_huggingface(
-                            file_path=str(output_path),
-                            repo_id=upload_cfg["repo_id"],
-                            repo_type="dataset",
-                            token=upload_cfg.get("token"),
-                        )
-                        console.print(f"[green]✓ Uploaded: {url}[/green]")
-                        episode_result["upload_url"] = url
+                        console.print("[cyan]Uploading episode files to Hugging Face...[/cyan]")
+                        
+                        # Find all files in the session directory
+                        session_files = list(session_output_dir.glob("*"))
+                        
+                        upload_urls = []
+                        for file_path in session_files:
+                            if file_path.is_file():
+                                console.print(f"[dim]Uploading {file_path.name}...[/dim]")
+                                url = upload_to_huggingface(
+                                    file_path=str(file_path),
+                                    repo_id=upload_cfg["repo_id"],
+                                    repo_type="dataset",
+                                    token=upload_cfg.get("token"),
+                                )
+                                upload_urls.append(url)
+                        
+                        console.print(f"[green]✓ Uploaded {len(upload_urls)} files[/green]")
+                        episode_result["upload_urls"] = upload_urls
                     except Exception as e:
                         console.print(f"[red]Upload failed: {e}[/red]")
 

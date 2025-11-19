@@ -1721,6 +1721,8 @@ dev = [
 ]
 gameplay-pipeline = [
     { name = "huggingface-hub" },
+    { name = "numpy" },
+    { name = "opencv-python" },
     { name = "pandas" },
     { name = "pillow" },
     { name = "pysiphon" },
@@ -1745,9 +1747,11 @@ yt-data-pipeline = [
 dev = [{ name = "ipykernel", specifier = ">=7.1.0" }]
 gameplay-pipeline = [
     { name = "huggingface-hub", specifier = ">=1.0.1" },
+    { name = "numpy", specifier = "<2.0" },
+    { name = "opencv-python", specifier = ">=4.8.0,<5.0" },
     { name = "pandas", specifier = ">=2.3.3" },
     { name = "pillow", specifier = ">=12.0.0" },
-    { name = "pysiphon", specifier = ">=1.0.1" },
+    { name = "pysiphon", specifier = ">=1.0.3" },
     { name = "rich", specifier = ">=13.0.0" },
     { name = "seaborn", specifier = ">=0.13.2" },
     { name = "tomli", marker = "python_full_version < '3.11'", specifier = ">=2.0.0" },
@@ -1895,7 +1899,7 @@ wheels = [
 
 [[package]]
 name = "pysiphon"
-version = "1.0.1"
+version = "1.0.3"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "click" },
@@ -1904,9 +1908,9 @@ dependencies = [
     { name = "pillow" },
     { name = "tomli" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/79/4a/e69828bba19a57cb4a1c30c4f02272b87add9cdc694552f141b93314465a/pysiphon-1.0.1.tar.gz", hash = "sha256:911a3e4d9df89b2495cbcf978cb9722d1738d3db0e40db12e8f171796df022f4", size = 18829, upload-time = "2025-11-05T05:25:04.632Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/c4/de/4631049fb8d5eecab0ced4f0fc06fdeed2f49b9a69e7fdab0f35512e9835/pysiphon-1.0.3.tar.gz", hash = "sha256:930e2ee3fe81b8a287c18f15216db2593412de4fff6d04bfde340d17633add52", size = 21316, upload-time = "2025-11-18T09:54:12.35Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/3d/1f/3ab706cc8ec95cadff833e15534e7a531ba048dc8f91eed35e3a590440a4/pysiphon-1.0.1-py3-none-any.whl", hash = "sha256:38d56a3102b1b5128f9628647dea793a9bcb6a48431d569306b1b9100e61efd1", size = 19561, upload-time = "2025-11-05T05:25:03.262Z" },
+    { url = "https://files.pythonhosted.org/packages/11/18/f9259c922b5fb07de69c9b443b456a3b8cc5f748640c75a307563032a972/pysiphon-1.0.3-py3-none-any.whl", hash = "sha256:1fa9809f66211915e9d75acca50d7ff1850cc126187ca5246dc52a8560a77920", size = 21671, upload-time = "2025-11-18T09:54:10.954Z" },
 ]
 
 [[package]]
