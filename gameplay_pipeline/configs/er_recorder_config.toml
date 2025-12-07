@@ -38,5 +38,5 @@ stop_conditions = [
     { condition = "NpcHp <= 0", reset_method = "save_reload" }      # Boss died → reload save
 ]
 # Save file configuration for save_reload reset
-save_file_name = "ER0000.margit.sl2"  # Name of the backup save file
+save_file_name = "ER0000.Margit-v0.sl2"  # Name of the backup save file
 save_file_dir = "C:\\Users\\DM\\AppData\\Roaming\\EldenRing\\76561198217475593"  # Directory containing saves

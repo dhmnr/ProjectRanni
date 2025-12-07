@@ -334,6 +334,7 @@ class GameplayRecorder:
                 threshold=condition_dict.get("threshold"),
                 conditions=condition_dict.get("conditions"),
             ):
+                time.sleep(check_interval)
                 return True
             
             if timeout and (time.time() - start_time) >= timeout:
@@ -384,7 +385,10 @@ class GameplayRecorder:
         self.client.input_key_tap(["LEFT_ARROW"])
         time.sleep(0.3)
         self.client.input_key_tap(["E"])
+        time.sleep(12.0)
+        time.sleep(5.0)
 
+        console.print("[green]✓ Game quit[/green]")
         # Copy save file if configured
         if hasattr(self, 'save_file_name') and hasattr(self, 'save_file_dir') and self.save_file_name and self.save_file_dir:
             console.print(f"[yellow]⟳ Copying save file: {self.save_file_name}[/yellow]")
@@ -409,7 +413,6 @@ class GameplayRecorder:
                 console.print(f"[red]✗ Failed to copy save file: {e}[/red]")
         else:
             console.print("[yellow]Waiting for save file copy (12s)...[/yellow]")
-        time.sleep(12.0)
         
         # Re-enter game
         self.client.input_key_tap(["E"])
