@@ -113,9 +113,16 @@ class RecordingToZarrConverter:
         
         # Convert to semantic action names if keybinds available
         if self.keybinds:
-            keys = [self.keybinds.get(k, k) for k in raw_keys]
-            # Also store the mapping
-            raw_to_semantic = {raw: sem for raw, sem in zip(raw_keys, keys)}
+            # Map raw keys to semantic names, then deduplicate while preserving order
+            semantic_keys = [self.keybinds.get(k, k) for k in raw_keys]
+            seen = set()
+            keys = []
+            for k in semantic_keys:
+                if k not in seen:
+                    seen.add(k)
+                    keys.append(k)
+            # Store the mapping from raw keys to semantic names
+            raw_to_semantic = {raw: self.keybinds.get(raw, raw) for raw in raw_keys}
         else:
             keys = raw_keys
             raw_to_semantic = {k: k for k in raw_keys}
