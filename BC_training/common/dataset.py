@@ -1,0 +1,256 @@
+"""Dataset loader for zarr gameplay data."""
+
+import zarr
+import numpy as np
+import jax.numpy as jnp
+from pathlib import Path
+from typing import Dict, List, Tuple, Optional
+import logging
+
+logger = logging.getLogger(__name__)
+
+
+class ZarrGameplayDataset:
+    """Dataset for loading gameplay recordings from zarr format.
+    
+    Loads episodes containing:
+    - frames: [N, C, H, W] uint8 arrays
+    - state: [N, num_attributes] float32 arrays (not used in pure CNN)
+    - actions: [N, num_actions] bool arrays
+    """
+    
+    def __init__(
+        self,
+        dataset_path: str,
+        episode_indices: Optional[List[int]] = None,
+        use_state: bool = False,
+        normalize_frames: bool = True,
+    ):
+        """Initialize dataset.
+        
+        Args:
+            dataset_path: Path to zarr dataset
+            episode_indices: List of episode indices to load (None = all)
+            use_state: Whether to include state features (not used in pure CNN)
+            normalize_frames: Whether to normalize frames to [0, 1]
+        """
+        self.dataset_path = Path(dataset_path)
+        self.use_state = use_state
+        self.normalize_frames = normalize_frames
+        
+        # Open zarr dataset
+        self.zarr_root = zarr.open(str(self.dataset_path), mode='r')
+        
+        # Get episode list
+        all_episodes = sorted([k for k in self.zarr_root.keys() if k.startswith('episode_')])
+        
+        if episode_indices is not None:
+            self.episodes = [f'episode_{i}' for i in episode_indices if f'episode_{i}' in all_episodes]
+        else:
+            self.episodes = all_episodes
+        
+        logger.info(f"Loaded dataset from {dataset_path}")
+        logger.info(f"Using {len(self.episodes)} episodes")
+        
+        # Get metadata
+        self.action_keys = self.zarr_root.attrs.get('keys', [])
+        self.state_attrs = self.zarr_root.attrs.get('attributes', [])
+        self.num_actions = len(self.action_keys)
+        
+        # Build episode index mapping
+        self._build_episode_index()
+        
+    def _build_episode_index(self):
+        """Build index of (episode_id, frame_idx) tuples for fast access."""
+        self.index = []
+        self.episode_lengths = []
+        
+        for ep_name in self.episodes:
+            ep = self.zarr_root[ep_name]
+            num_frames = ep['frames'].shape[0]
+            self.episode_lengths.append(num_frames)
+            
+            for frame_idx in range(num_frames):
+                self.index.append((ep_name, frame_idx))
+        
+        logger.info(f"Total frames: {len(self.index)}")
+        logger.info(f"Episode lengths - min: {min(self.episode_lengths)}, "
+                   f"max: {max(self.episode_lengths)}, "
+                   f"mean: {np.mean(self.episode_lengths):.1f}")
+    
+    def __len__(self) -> int:
+        """Return total number of frames."""
+        return len(self.index)
+    
+    def __getitem__(self, idx: int) -> Dict[str, np.ndarray]:
+        """Get a single frame and its corresponding action.
+        
+        Args:
+            idx: Frame index
+            
+        Returns:
+            Dict with 'frames' and 'actions' (and optionally 'state')
+        """
+        ep_name, frame_idx = self.index[idx]
+        ep = self.zarr_root[ep_name]
+        
+        # Load frame [C, H, W]
+        frame = np.array(ep['frames'][frame_idx])
+        
+        # Normalize to [0, 1]
+        if self.normalize_frames:
+            frame = frame.astype(np.float32) / 255.0
+        else:
+            frame = frame.astype(np.float32)
+        
+        # Load actions [num_actions]
+        actions = np.array(ep['actions'][frame_idx], dtype=np.float32)
+        
+        result = {
+            'frames': frame,
+            'actions': actions,
+        }
+        
+        # Optionally load state
+        if self.use_state:
+            state = np.array(ep['state'][frame_idx], dtype=np.float32)
+            result['state'] = state
+        
+        return result
+    
+    def get_episode(self, episode_idx: int) -> Dict[str, np.ndarray]:
+        """Get entire episode data.
+        
+        Args:
+            episode_idx: Index in self.episodes list
+            
+        Returns:
+            Dict with full episode data
+        """
+        ep_name = self.episodes[episode_idx]
+        ep = self.zarr_root[ep_name]
+        
+        frames = np.array(ep['frames'][:])
+        if self.normalize_frames:
+            frames = frames.astype(np.float32) / 255.0
+        else:
+            frames = frames.astype(np.float32)
+        
+        actions = np.array(ep['actions'][:], dtype=np.float32)
+        
+        result = {
+            'frames': frames,
+            'actions': actions,
+            'episode_name': ep_name,
+            'fps': ep.attrs.get('fps', None),
+        }
+        
+        if self.use_state:
+            result['state'] = np.array(ep['state'][:], dtype=np.float32)
+        
+        return result
+    
+    def compute_action_weights(self) -> np.ndarray:
+        """Compute class weights for imbalanced actions.
+        
+        Returns:
+            Array of shape [num_actions] with weights for each action
+        """
+        action_counts = np.zeros(self.num_actions)
+        
+        for ep_name in self.episodes:
+            ep = self.zarr_root[ep_name]
+            actions = np.array(ep['actions'][:])
+            action_counts += actions.sum(axis=0)
+        
+        # Inverse frequency weighting
+        total_frames = len(self.index)
+        weights = total_frames / (self.num_actions * action_counts + 1e-8)
+        
+        # Normalize so mean weight is 1
+        weights = weights / weights.mean()
+        
+        logger.info(f"Action counts: {action_counts}")
+        logger.info(f"Action weights: {weights}")
+        
+        return weights
+
+
+def create_data_loader(
+    dataset: ZarrGameplayDataset,
+    batch_size: int,
+    shuffle: bool = True,
+    drop_last: bool = False,
+) -> Tuple[np.ndarray, ...]:
+    """Create a simple numpy-based data loader.
+    
+    Args:
+        dataset: ZarrGameplayDataset instance
+        batch_size: Batch size
+        shuffle: Whether to shuffle data
+        drop_last: Whether to drop last incomplete batch
+        
+    Yields:
+        Batches of data as numpy arrays
+    """
+    indices = np.arange(len(dataset))
+    
+    if shuffle:
+        np.random.shuffle(indices)
+    
+    num_batches = len(dataset) // batch_size
+    if not drop_last and len(dataset) % batch_size != 0:
+        num_batches += 1
+    
+    for i in range(num_batches):
+        start_idx = i * batch_size
+        end_idx = min(start_idx + batch_size, len(dataset))
+        batch_indices = indices[start_idx:end_idx]
+        
+        # Collect batch
+        batch_data = [dataset[int(idx)] for idx in batch_indices]
+        
+        # Stack into arrays
+        batch = {
+            'frames': np.stack([d['frames'] for d in batch_data]),
+            'actions': np.stack([d['actions'] for d in batch_data]),
+        }
+        
+        if dataset.use_state:
+            batch['state'] = np.stack([d['state'] for d in batch_data])
+        
+        yield batch
+
+
+def split_episodes(
+    total_episodes: int,
+    train_ratio: float = 0.8,
+    val_ratio: float = 0.2,
+    seed: int = 42,
+) -> Tuple[List[int], List[int]]:
+    """Split episode indices into train/val sets.
+    
+    Args:
+        total_episodes: Total number of episodes
+        train_ratio: Ratio of episodes for training
+        val_ratio: Ratio of episodes for validation
+        seed: Random seed
+        
+    Returns:
+        (train_indices, val_indices)
+    """
+    assert abs(train_ratio + val_ratio - 1.0) < 1e-6, "Ratios must sum to 1"
+    
+    rng = np.random.RandomState(seed)
+    indices = np.arange(total_episodes)
+    rng.shuffle(indices)
+    
+    train_size = int(total_episodes * train_ratio)
+    
+    train_indices = indices[:train_size].tolist()
+    val_indices = indices[train_size:].tolist()
+    
+    logger.info(f"Split {total_episodes} episodes: {len(train_indices)} train, {len(val_indices)} val")
+    
+    return train_indices, val_indices
+

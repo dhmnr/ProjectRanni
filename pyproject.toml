@@ -29,9 +29,23 @@ gameplay_pipeline = [
     "numpy<2.0",
     "zarr>=2.18.0",
 ]
+bc_training = [
+    "jax>=0.4.20",
+    "jaxlib>=0.4.20",
+    "flax>=0.8.0",
+    "optax>=0.1.9",
+    "zarr>=2.18.0",
+    "omegaconf>=2.3.0",
+    "pyyaml>=6.0",
+    "wandb>=0.16.0",
+    "matplotlib>=3.7.0",
+    "pandas>=2.3.3",
+    "tqdm>=4.65.0",
+    "numpy<2.0",
+]
 dev = [
     "ipykernel>=7.1.0",
 ]
 
 [tool.uv]
-default-groups = ["yt_data_pipeline", "gameplay_pipeline", "dev"]
+default-groups = ["yt_data_pipeline", "gameplay_pipeline", "bc_training", "dev"]

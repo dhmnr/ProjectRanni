@@ -4,10 +4,11 @@ A comprehensive data pipeline for collecting and managing gameplay data from vid
 
 ## Overview
 
-This project consists of two main pipelines:
+This project consists of three main pipelines:
 
 1. **YouTube Data Pipeline** (`yt_data_pipeline`) - Download, process, and extract data from gameplay videos
 2. **Gameplay Pipeline** (`gameplay_pipeline`) - Record live gameplay and upload to Hugging Face
+3. **BC Training** (`BC_training`) - Train behavior cloning models with JAX/Flax
 
 ## Installation
 
@@ -20,6 +21,7 @@ uv sync
 # Or install specific pipeline dependencies
 uv sync --group yt_data_pipeline
 uv sync --group gameplay_pipeline
+uv sync --group bc_training
 ```
 
 ## YouTube Data Pipeline
@@ -182,6 +184,30 @@ upload_folder_to_huggingface(
 )
 ```
 
+## BC Training
+
+Train behavior cloning models to learn from recorded gameplay data.
+
+### Features
+
+- JAX/Flax-based deep learning pipeline
+- Pure CNN baseline (vision-only)
+- WandB integration for experiment tracking
+- Modular architecture for multiple model variants
+- Comprehensive evaluation metrics
+
+### Usage
+
+```bash
+# Train pure CNN baseline
+uv run -m BC_training --config configs/pure_cnn.yaml
+
+# Test setup
+uv run python BC_training/scripts/test_setup.py
+```
+
+See `BC_training/QUICKSTART.md` for detailed instructions.
+
 ## Project Structure
 
 ```
@@ -196,6 +222,12 @@ ProjectRanni/
 │   ├── record_gameplay.py     # Main recording script
 │   ├── hf_upload.py          # Hugging Face upload utilities
 │   └── siphon_config.toml.example  # Example configuration
+├── BC_training/               # Behavior cloning training
+│   ├── common/               # Shared utilities (dataset, metrics)
+│   ├── models/               # Model implementations
+│   ├── configs/              # Training configurations
+│   ├── train.py             # Main training script
+│   └── QUICKSTART.md        # Setup guide
 ├── data/                      # Data storage
 │   └── videos/               # Downloaded and processed videos
 ├── pyproject.toml            # Project dependencies
