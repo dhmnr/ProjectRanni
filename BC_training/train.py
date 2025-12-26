@@ -517,8 +517,8 @@ def train(config_path: str):
                 table.add_column("Loss", justify="right")
                 table.add_column("Accuracy", justify="right")
                 
-                table.add_row("Train", f"{avg_train_loss:.4f}", f"{avg_train_accuracy:.4f}")
-                table.add_row("Val", f"{val_metrics['loss']:.4f}", f"{val_metrics['accuracy']:.4f}")
+                table.add_row("Train", f"{float(avg_train_loss):.4f}", f"{float(avg_train_accuracy):.4f}")
+                table.add_row("Val", f"{float(val_metrics['loss']):.4f}", f"{float(val_metrics['accuracy']):.4f}")
                 
                 console.print(table)
                 print_metrics_summary(val_metrics, action_names, title=f"Validation Metrics (Epoch {epoch + 1})")
