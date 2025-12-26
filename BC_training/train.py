@@ -321,12 +321,25 @@ def evaluate(state: TrainState, dataset: ZarrGameplayDataset, config: Dict) -> D
     per_action_metrics = compute_per_action_metrics(all_predictions, all_targets, threshold=0.5)
     dist_metrics = compute_action_distribution_distance(all_predictions, all_targets, threshold=0.5)
     
+    # Ensure all scalar values are Python floats, not numpy arrays
     metrics = {
-        'loss': float(avg_loss),
-        'accuracy': float(accuracy),
+        'loss': avg_loss,
+        'accuracy': accuracy,
         **per_action_metrics,
         **dist_metrics,
     }
+    
+    # Convert any numpy scalars to Python floats using .item()
+    for key in ['loss', 'accuracy', 'l1_distance', 'l2_distance', 'kl_divergence']:
+        if key in metrics:
+            val = metrics[key]
+            if isinstance(val, np.ndarray) and val.ndim == 0:
+                metrics[key] = val.item()
+            elif hasattr(val, 'item') and callable(val.item):
+                try:
+                    metrics[key] = val.item()
+                except:
+                    pass
     
     return metrics
 
