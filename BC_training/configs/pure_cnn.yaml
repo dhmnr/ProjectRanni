@@ -2,12 +2,13 @@
 
 # Dataset
 dataset:
-  path: "../dataset/margit_100_512x288.zarr"
+  path: "./dataset/margit_100_256x144.zarr"
   train_ratio: 0.8
   val_ratio: 0.2
   split_seed: 42
   normalize_frames: true
   use_state: false  # Pure CNN doesn't use state
+  validate_episodes: true  # Auto-filter episodes with mismatched dimensions
 
 # Model
 model:
@@ -51,7 +52,7 @@ evaluation:
 logging:
   use_wandb: true
   wandb_project: "ProjectRanni-BC"
-  wandb_entity: null  # Set to your wandb username/team
+  wandb_entity: dhmnr-projects  # Set to your wandb username/team
   wandb_run_name: "pure_cnn_baseline"
   log_every_n_steps: 50
   log_gradients: false

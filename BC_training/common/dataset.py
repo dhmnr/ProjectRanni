@@ -25,6 +25,7 @@ class ZarrGameplayDataset:
         episode_indices: Optional[List[int]] = None,
         use_state: bool = False,
         normalize_frames: bool = True,
+        validate_episodes: bool = True,
     ):
         """Initialize dataset.
         
@@ -33,6 +34,7 @@ class ZarrGameplayDataset:
             episode_indices: List of episode indices to load (None = all)
             use_state: Whether to include state features (not used in pure CNN)
             normalize_frames: Whether to normalize frames to [0, 1]
+            validate_episodes: Whether to filter out episodes with mismatched shapes
         """
         self.dataset_path = Path(dataset_path)
         self.use_state = use_state
@@ -50,15 +52,65 @@ class ZarrGameplayDataset:
             self.episodes = all_episodes
         
         logger.info(f"Loaded dataset from {dataset_path}")
-        logger.info(f"Using {len(self.episodes)} episodes")
+        logger.info(f"Found {len(self.episodes)} episodes")
         
         # Get metadata
         self.action_keys = self.zarr_root.attrs.get('keys', [])
         self.state_attrs = self.zarr_root.attrs.get('attributes', [])
         self.num_actions = len(self.action_keys)
         
+        # Validate and filter episodes if requested
+        if validate_episodes:
+            self._validate_and_filter_episodes()
+        
+        logger.info(f"Using {len(self.episodes)} valid episodes")
+        
         # Build episode index mapping
         self._build_episode_index()
+    
+    def _validate_and_filter_episodes(self):
+        """Validate episodes and filter out those with mismatched dimensions."""
+        valid_episodes = []
+        skipped_episodes = []
+        
+        # Get expected shapes from metadata
+        expected_num_actions = self.num_actions
+        expected_num_state = len(self.state_attrs)
+        
+        for ep_name in self.episodes:
+            ep = self.zarr_root[ep_name]
+            
+            # Check action dimensions
+            actions_shape = ep['actions'].shape
+            if actions_shape[1] != expected_num_actions:
+                skipped_episodes.append((ep_name, f"actions={actions_shape[1]} (expected {expected_num_actions})"))
+                continue
+            
+            # Check state dimensions
+            state_shape = ep['state'].shape
+            if state_shape[1] != expected_num_state:
+                skipped_episodes.append((ep_name, f"state={state_shape[1]} (expected {expected_num_state})"))
+                continue
+            
+            # Check frame-action-state alignment
+            frames_len = ep['frames'].shape[0]
+            if actions_shape[0] != frames_len or state_shape[0] != frames_len:
+                skipped_episodes.append((ep_name, f"length mismatch: frames={frames_len}, actions={actions_shape[0]}, state={state_shape[0]}"))
+                continue
+            
+            valid_episodes.append(ep_name)
+        
+        if skipped_episodes:
+            logger.warning(f"Skipped {len(skipped_episodes)} episodes with invalid dimensions:")
+            for ep_name, reason in skipped_episodes[:10]:  # Show first 10
+                logger.warning(f"  - {ep_name}: {reason}")
+            if len(skipped_episodes) > 10:
+                logger.warning(f"  ... and {len(skipped_episodes) - 10} more")
+        
+        self.episodes = valid_episodes
+        
+        if len(valid_episodes) == 0:
+            raise ValueError("No valid episodes found in dataset! All episodes have mismatched dimensions.")
         
     def _build_episode_index(self):
         """Build index of (episode_id, frame_idx) tuples for fast access."""

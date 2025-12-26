@@ -356,6 +356,7 @@ def train(config_path: str):
         episode_indices=train_indices,
         use_state=config['dataset']['use_state'],
         normalize_frames=config['dataset']['normalize_frames'],
+        validate_episodes=config['dataset'].get('validate_episodes', True),
     )
     
     val_dataset = ZarrGameplayDataset(
@@ -363,6 +364,7 @@ def train(config_path: str):
         episode_indices=val_indices,
         use_state=config['dataset']['use_state'],
         normalize_frames=config['dataset']['normalize_frames'],
+        validate_episodes=config['dataset'].get('validate_episodes', True),
     )
     
     # Get action names
