@@ -23,15 +23,17 @@ from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn, TimeRe
 console = Console()
 
 
-def load_keybinds(keybinds_path: Optional[str] = None) -> Dict[str, str]:
+def load_keybinds(keybinds_path: Optional[str] = None) -> Tuple[Dict[str, str], List[str]]:
     """
-    Load keybinds mapping from JSON file.
+    Load keybinds mapping from JSON file and extract master action list.
     
     Args:
         keybinds_path: Path to keybinds.json file
         
     Returns:
-        Dict mapping raw keys to semantic action names
+        Tuple of (raw_to_action_mapping, sorted_unique_actions)
+        - raw_to_action_mapping: Dict mapping raw keys to semantic action names
+        - sorted_unique_actions: Sorted list of all unique action names (master schema)
     """
     if keybinds_path is None:
         # Default to configs/keybinds.json
@@ -40,17 +42,26 @@ def load_keybinds(keybinds_path: Optional[str] = None) -> Dict[str, str]:
         keybinds_path = Path(keybinds_path)
     
     if not keybinds_path.exists():
-        console.print(f"[yellow]Warning: Keybinds file not found at {keybinds_path}[/yellow]")
-        console.print("[yellow]Using raw key names instead of semantic names[/yellow]")
-        return {}
+        console.print(f"[red]Error: Keybinds file not found at {keybinds_path}[/red]")
+        console.print(f"[red]A keybinds file is required to ensure consistent action schema.[/red]")
+        raise FileNotFoundError(f"Keybinds file not found: {keybinds_path}")
     
     try:
         with open(keybinds_path, 'r') as f:
             data = json.load(f)
-            return data.get('keybinds', {})
+            raw_to_action = data.get('keybinds', {})
+            
+            if not raw_to_action:
+                raise ValueError("No 'keybinds' found in JSON file")
+            
+            # Extract unique action names (multiple keys can map to same action)
+            unique_actions = sorted(list(set(raw_to_action.values())))
+            
+            return raw_to_action, unique_actions
+            
     except Exception as e:
-        console.print(f"[yellow]Warning: Could not load keybinds: {e}[/yellow]")
-        return {}
+        console.print(f"[red]Error loading keybinds: {e}[/red]")
+        raise
 
 
 class RecordingToZarrConverter:
@@ -69,17 +80,17 @@ class RecordingToZarrConverter:
         Args:
             recordings_dir: Directory containing recording session folders
             output_zarr: Path to output zarr file
-            keybinds_path: Path to keybinds.json file (optional)
+            keybinds_path: Path to keybinds.json file (REQUIRED for consistent schema)
             target_resolution: Target resolution (width, height) to resize frames (optional)
         """
         self.recordings_dir = Path(recordings_dir)
         self.output_zarr = Path(output_zarr)
         self.target_resolution = target_resolution
         
-        # Load keybinds mapping
-        self.keybinds = load_keybinds(keybinds_path)
-        if self.keybinds:
-            console.print(f"[cyan]Loaded {len(self.keybinds)} keybind mappings[/cyan]")
+        # Load keybinds mapping and master action list
+        self.keybinds, self.master_actions = load_keybinds(keybinds_path)
+        console.print(f"[cyan]Loaded {len(self.keybinds)} keybind mappings → {len(self.master_actions)} unique actions[/cyan]")
+        console.print(f"[cyan]Master actions: {', '.join(self.master_actions)}[/cyan]")
         
         if self.target_resolution:
             console.print(f"[cyan]Will resize frames to {target_resolution[0]}x{target_resolution[1]}[/cyan]")
@@ -101,32 +112,9 @@ class RecordingToZarrConverter:
         Load session information without loading full data.
         
         Returns:
-            Dict with keys, attributes, frame count, etc.
+            Dict with attributes, frame count, etc.
+            Note: Actions come from master keybinds, not from session
         """
-        # Load inputs to get key names
-        inputs_df = pd.read_csv(session_dir / "inputs.csv")
-        inputs_df = inputs_df[
-            inputs_df['event_type'].isin(['KEY_DOWN', 'KEY_UP', 'MOUSE_DOWN', 'MOUSE_UP'])
-        ].copy()
-        key_events = inputs_df[inputs_df['key_or_button'] != 'MOVE']
-        raw_keys = sorted(key_events['key_or_button'].unique().tolist())
-        
-        # Convert to semantic action names if keybinds available
-        if self.keybinds:
-            # Map raw keys to semantic names, then deduplicate while preserving order
-            semantic_keys = [self.keybinds.get(k, k) for k in raw_keys]
-            seen = set()
-            keys = []
-            for k in semantic_keys:
-                if k not in seen:
-                    seen.add(k)
-                    keys.append(k)
-            # Store the mapping from raw keys to semantic names
-            raw_to_semantic = {raw: self.keybinds.get(raw, raw) for raw in raw_keys}
-        else:
-            keys = raw_keys
-            raw_to_semantic = {k: k for k in raw_keys}
-        
         # Load memory data to get attribute names
         memory_df = pd.read_csv(session_dir / "memory_data.csv")
         attributes = [col for col in memory_df.columns if col != 'timestamp_us']
@@ -140,8 +128,6 @@ class RecordingToZarrConverter:
         video_capture.release()
         
         return {
-            'keys': keys,
-            'raw_to_semantic': raw_to_semantic,
             'attributes': attributes,
             'frame_count': frame_count,
             'fps': fps,
@@ -152,30 +138,31 @@ class RecordingToZarrConverter:
     def _convert_inputs_to_framewise(
         self, 
         inputs_df: pd.DataFrame, 
-        keys: List[str],
-        raw_to_semantic: Dict[str, str],
+        master_actions: List[str],
+        keybinds: Dict[str, str],
         start_timestamp_us: int,
         fps: float,
         num_frames: int
     ) -> np.ndarray:
         """
-        Convert event-based inputs to framewise boolean array.
+        Convert event-based inputs to framewise boolean array using master action list.
         
         Args:
             inputs_df: Input events dataframe
-            keys: List of SEMANTIC key names in order
-            raw_to_semantic: Mapping from raw keys to semantic names
+            master_actions: Master list of all possible actions (from keybinds.json)
+            keybinds: Mapping from raw keys to action names
             start_timestamp_us: Starting timestamp
             fps: Frames per second
             num_frames: Number of frames to generate
             
         Returns:
-            Array of shape [num_frames, num_keys] with boolean values
+            Array of shape [num_frames, num_actions] with boolean values
         """
-        actions = np.zeros((num_frames, len(keys)), dtype=bool)
+        actions = np.zeros((num_frames, len(master_actions)), dtype=bool)
         
-        # Track key state using SEMANTIC names
-        pressed_keys = set()
+        # Track which ACTIONS are currently active (not keys!)
+        # Multiple keys can activate the same action
+        pressed_actions = set()
         
         # Sort events by timestamp
         inputs_df = inputs_df.sort_values('timestamp_us').reset_index(drop=True)
@@ -194,19 +181,24 @@ class RecordingToZarrConverter:
                 raw_key = event['key_or_button']
                 event_type = event['event_type']
                 
-                # Convert raw key to semantic name
-                semantic_key = raw_to_semantic.get(raw_key, raw_key)
+                # Convert raw key to action name using keybinds
+                action_name = keybinds.get(raw_key)
+                
+                # Skip unknown keys (not in keybinds)
+                if action_name is None:
+                    event_idx += 1
+                    continue
                 
                 if event_type in ['KEY_DOWN', 'MOUSE_DOWN']:
-                    pressed_keys.add(semantic_key)
+                    pressed_actions.add(action_name)
                 elif event_type in ['KEY_UP', 'MOUSE_UP']:
-                    pressed_keys.discard(semantic_key)
+                    pressed_actions.discard(action_name)
                 
                 event_idx += 1
             
-            # Set action values for this frame
-            for key_idx, key in enumerate(keys):
-                actions[frame_idx, key_idx] = key in pressed_keys
+            # Set action values for this frame using master action list
+            for action_idx, action_name in enumerate(master_actions):
+                actions[frame_idx, action_idx] = action_name in pressed_actions
         
         return actions
     
@@ -327,13 +319,9 @@ class RecordingToZarrConverter:
             # Load session info
             info = self._load_session_info(session_dir)
             
-            # Update global metadata with keys, attributes, and mappings
-            if 'keys' not in global_metadata:
-                global_metadata['keys'] = info['keys']
+            # Update global metadata with attributes (actions come from master keybinds)
             if 'attributes' not in global_metadata:
                 global_metadata['attributes'] = info['attributes']
-            if 'raw_to_semantic' not in global_metadata:
-                global_metadata['raw_to_semantic'] = info['raw_to_semantic']
             
             # Load data
             console.print("  Loading inputs...")
@@ -346,12 +334,12 @@ class RecordingToZarrConverter:
             memory_df = pd.read_csv(session_dir / "memory_data.csv")
             start_timestamp_us = memory_df['timestamp_us'].iloc[0]
             
-            # Convert to framewise
-            console.print("  Converting actions to framewise...")
+            # Convert to framewise using master actions from keybinds
+            console.print("  Converting actions to framewise (using master keybinds)...")
             actions = self._convert_inputs_to_framewise(
                 inputs_df,
-                info['keys'],
-                info['raw_to_semantic'],
+                self.master_actions,  # Use master action list
+                self.keybinds,         # Use keybinds mapping
                 start_timestamp_us,
                 info['fps'],
                 info['frame_count']
@@ -403,7 +391,7 @@ class RecordingToZarrConverter:
             episode_group.array(
                 'actions',
                 actions,
-                chunks=(100, len(info['keys'])),
+                chunks=(100, len(self.master_actions)),
                 dtype='bool',
                 compressor=zarr.Blosc(cname='zstd', clevel=3)
             )
@@ -414,7 +402,7 @@ class RecordingToZarrConverter:
             episode_group.attrs['frame_count'] = info['frame_count']
             episode_group.attrs['original_resolution'] = [info['frame_height'], info['frame_width']]
             episode_group.attrs['stored_resolution'] = [frames.shape[2], frames.shape[3]]
-            episode_group.attrs['action_keys'] = info['keys']
+            episode_group.attrs['action_keys'] = self.master_actions
             episode_group.attrs['state_attributes'] = info['attributes']
             
             console.print(f"[green]✓ Converted {info['frame_count']} frames[/green]")
@@ -440,11 +428,12 @@ class RecordingToZarrConverter:
         # Create zarr root (zarr will create the directory)
         zarr_root = zarr.open_group(str(self.output_zarr), mode='w')
         
-        # Global metadata
+        # Global metadata with master actions from keybinds
         global_metadata = {
             'version': '1.0',
             'format': 'framewise',
             'source': str(self.recordings_dir),
+            'keys': self.master_actions,  # Master action list from keybinds
         }
         
         if self.target_resolution:
@@ -524,14 +513,6 @@ class RecordingToZarrConverter:
         if 'keys' in zarr_root.attrs:
             console.print(f"\n  Action keys ({len(zarr_root.attrs['keys'])}):")
             console.print(f"    {', '.join(zarr_root.attrs['keys'])}")
-            
-            # Show raw -> semantic mapping if available
-            if 'raw_to_semantic' in zarr_root.attrs:
-                console.print(f"\n  Key Mappings (raw -> semantic):")
-                mapping = zarr_root.attrs['raw_to_semantic']
-                for raw, semantic in sorted(mapping.items()):
-                    if raw != semantic:  # Only show if different
-                        console.print(f"    {raw:15s} → {semantic}")
         
         if 'attributes' in zarr_root.attrs:
             console.print(f"\n  State attributes ({len(zarr_root.attrs['attributes'])}):")
@@ -571,7 +552,7 @@ def main():
         '--keybinds',
         type=str,
         default=None,
-        help='Path to keybinds.json file (default: configs/keybinds.json)'
+        help='Path to keybinds.json file (default: configs/keybinds.json) - REQUIRED for consistent action schema'
     )
     parser.add_argument(
         '--resolution',
