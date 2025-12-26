@@ -32,6 +32,8 @@ def compute_per_action_metrics(
 ) -> Dict[str, np.ndarray]:
     """Compute per-action metrics (accuracy, precision, recall, F1).
     
+    Vectorized implementation - no Python loops.
+    
     Args:
         predictions: Predicted probabilities [N, num_actions]
         targets: Ground truth binary labels [N, num_actions]
@@ -41,40 +43,26 @@ def compute_per_action_metrics(
         Dict with per-action metrics
     """
     pred_binary = (predictions > threshold).astype(np.float32)
+    targets = targets.astype(np.float32)
     
-    num_actions = predictions.shape[1]
+    # Vectorized accuracy: mean of correct predictions per action
+    accuracy = np.mean(pred_binary == targets, axis=0)
     
-    accuracy = np.zeros(num_actions)
-    precision = np.zeros(num_actions)
-    recall = np.zeros(num_actions)
-    f1_score = np.zeros(num_actions)
+    # Vectorized TP, FP, FN computation
+    tp = np.sum((pred_binary == 1) & (targets == 1), axis=0)
+    fp = np.sum((pred_binary == 1) & (targets == 0), axis=0)
+    fn = np.sum((pred_binary == 0) & (targets == 1), axis=0)
     
-    for i in range(num_actions):
-        pred_i = pred_binary[:, i]
-        target_i = targets[:, i]
-        
-        # Accuracy
-        accuracy[i] = np.mean(pred_i == target_i)
-        
-        # True positives, false positives, false negatives
-        tp = np.sum((pred_i == 1) & (target_i == 1))
-        fp = np.sum((pred_i == 1) & (target_i == 0))
-        fn = np.sum((pred_i == 0) & (target_i == 1))
-        
-        # Precision
-        precision[i] = tp / (tp + fp + 1e-8)
-        
-        # Recall
-        recall[i] = tp / (tp + fn + 1e-8)
-        
-        # F1
-        f1_score[i] = 2 * precision[i] * recall[i] / (precision[i] + recall[i] + 1e-8)
+    # Precision, Recall, F1 - all vectorized
+    precision = tp / (tp + fp + 1e-8)
+    recall = tp / (tp + fn + 1e-8)
+    f1_score = 2 * precision * recall / (precision + recall + 1e-8)
     
     return {
-        'accuracy': accuracy,
-        'precision': precision,
-        'recall': recall,
-        'f1_score': f1_score,
+        'per_action_accuracy': accuracy,
+        'per_action_precision': precision,
+        'per_action_recall': recall,
+        'per_action_f1_score': f1_score,
     }
 
 
@@ -172,19 +160,19 @@ def print_metrics_summary(
     
     # Per-action
     for i, action_name in enumerate(action_names):
-        acc = metrics['accuracy'][i] if 'accuracy' in metrics else 0
-        prec = metrics['precision'][i] if 'precision' in metrics else 0
-        rec = metrics['recall'][i] if 'recall' in metrics else 0
-        f1 = metrics['f1_score'][i] if 'f1_score' in metrics else 0
+        acc = metrics['per_action_accuracy'][i] if 'per_action_accuracy' in metrics else 0
+        prec = metrics['per_action_precision'][i] if 'per_action_precision' in metrics else 0
+        rec = metrics['per_action_recall'][i] if 'per_action_recall' in metrics else 0
+        f1 = metrics['per_action_f1_score'][i] if 'per_action_f1_score' in metrics else 0
         
         print(f"{action_name:<20} {acc:>8.4f} {prec:>8.4f} {rec:>8.4f} {f1:>8.4f}")
     
     # Mean
     print(f"{'-'*60}")
-    mean_acc = np.mean(metrics['accuracy']) if 'accuracy' in metrics else 0
-    mean_prec = np.mean(metrics['precision']) if 'precision' in metrics else 0
-    mean_rec = np.mean(metrics['recall']) if 'recall' in metrics else 0
-    mean_f1 = np.mean(metrics['f1_score']) if 'f1_score' in metrics else 0
+    mean_acc = np.mean(metrics['per_action_accuracy']) if 'per_action_accuracy' in metrics else 0
+    mean_prec = np.mean(metrics['per_action_precision']) if 'per_action_precision' in metrics else 0
+    mean_rec = np.mean(metrics['per_action_recall']) if 'per_action_recall' in metrics else 0
+    mean_f1 = np.mean(metrics['per_action_f1_score']) if 'per_action_f1_score' in metrics else 0
     
     print(f"{'Mean':<20} {mean_acc:>8.4f} {mean_prec:>8.4f} {mean_rec:>8.4f} {mean_f1:>8.4f}")
     print(f"{'='*60}\n")

@@ -11,7 +11,9 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import optax
-from flax.training import train_state, checkpoints
+from flax.training import train_state
+from flax import serialization
+import pickle
 from omegaconf import OmegaConf
 import wandb
 from rich.console import Console
@@ -45,6 +47,60 @@ logger = logging.getLogger(__name__)
 class TrainState(train_state.TrainState):
     """Extended train state with batch stats for batch norm."""
     batch_stats: Any = None
+
+
+def save_checkpoint(ckpt_dir: Path, state: TrainState, name: str):
+    """Save checkpoint using simple pickle + numpy.
+    
+    Args:
+        ckpt_dir: Checkpoint directory
+        state: TrainState to save
+        name: Checkpoint name (e.g., 'best' or 'epoch_5')
+    """
+    ckpt_path = ckpt_dir / f"{name}.pkl"
+    
+    # Convert JAX arrays to numpy for serialization
+    ckpt_data = {
+        'step': int(state.step),
+        'params': jax.tree.map(np.array, state.params),
+        'opt_state': jax.tree.map(
+            lambda x: np.array(x) if hasattr(x, 'shape') else x,
+            state.opt_state
+        ),
+        'batch_stats': jax.tree.map(np.array, state.batch_stats) if state.batch_stats else None,
+    }
+    
+    with open(ckpt_path, 'wb') as f:
+        pickle.dump(ckpt_data, f)
+
+
+def load_checkpoint(ckpt_path: Path, state: TrainState) -> TrainState:
+    """Load checkpoint.
+    
+    Args:
+        ckpt_path: Path to checkpoint file
+        state: TrainState with initialized structure
+        
+    Returns:
+        TrainState with loaded parameters
+    """
+    with open(ckpt_path, 'rb') as f:
+        ckpt_data = pickle.load(f)
+    
+    # Convert numpy arrays back to JAX arrays
+    params = jax.tree.map(jnp.array, ckpt_data['params'])
+    opt_state = jax.tree.map(
+        lambda x: jnp.array(x) if isinstance(x, np.ndarray) else x,
+        ckpt_data['opt_state']
+    )
+    batch_stats = jax.tree.map(jnp.array, ckpt_data['batch_stats']) if ckpt_data['batch_stats'] else None
+    
+    return state.replace(
+        step=ckpt_data['step'],
+        params=params,
+        opt_state=opt_state,
+        batch_stats=batch_stats,
+    )
 
 
 def create_train_state(
@@ -265,81 +321,88 @@ def eval_step(state: TrainState, batch: Dict):
         batch: Batch of data
         
     Returns:
-        (logits, loss)
+        (predictions, loss)
     """
-    # Forward pass (no dropout, use running averages for batch norm)
     variables = {'params': state.params}
     if state.batch_stats is not None:
         variables['batch_stats'] = state.batch_stats
     
-    logits = state.apply_fn(
-        variables,
-        batch['frames'],
-        training=False,
-    )
-    
-    # Compute loss (no weights for eval)
+    logits = state.apply_fn(variables, batch['frames'], training=False)
     loss = binary_cross_entropy_with_logits(logits, batch['actions'])
+    predictions = jax.nn.sigmoid(logits)
     
-    return logits, loss
+    return predictions, loss
 
 
-def evaluate(state: TrainState, dataset: ZarrGameplayDataset, config: Dict) -> Dict:
-    """Evaluate model on dataset.
+def evaluate(state: TrainState, dataset: ZarrGameplayDataset, config: Dict, show_progress: bool = True) -> Dict:
+    """Evaluate model on dataset with JIT-compiled steps and progress bar.
     
     Args:
         state: TrainState
         dataset: Evaluation dataset
         config: Config dict
+        show_progress: Whether to show progress bar
         
     Returns:
         Dict of evaluation metrics
     """
+    batch_size = config['training']['batch_size']
+    
+    # Pre-compute number of batches for progress bar
+    total_samples = len(dataset)
+    num_batches = (total_samples + batch_size - 1) // batch_size
+    
     all_predictions = []
     all_targets = []
     total_loss = 0.0
-    num_batches = 0
+    batches_processed = 0
     
-    batch_size = config['training']['batch_size']
-    
-    for batch in create_data_loader(dataset, batch_size, shuffle=False, drop_last=False):
-        logits, loss = eval_step(state, batch)
-        predictions = jax.nn.sigmoid(logits)
-        
-        all_predictions.append(np.array(predictions))
-        all_targets.append(np.array(batch['actions']))
-        total_loss += float(loss)
-        num_batches += 1
+    if show_progress:
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[cyan]Evaluating"),
+            BarColumn(),
+            MofNCompleteColumn(),
+            TimeRemainingColumn(),
+            console=console,
+            transient=True,
+        ) as progress:
+            task = progress.add_task("Eval", total=num_batches)
+            
+            for batch in create_data_loader(dataset, batch_size, shuffle=False, drop_last=False):
+                predictions, loss = eval_step(state, batch)
+                
+                # Block until computation is done, then convert
+                all_predictions.append(np.asarray(predictions))
+                all_targets.append(np.asarray(batch['actions']))
+                total_loss += float(loss)
+                batches_processed += 1
+                progress.update(task, advance=1)
+    else:
+        for batch in create_data_loader(dataset, batch_size, shuffle=False, drop_last=False):
+            predictions, loss = eval_step(state, batch)
+            all_predictions.append(np.asarray(predictions))
+            all_targets.append(np.asarray(batch['actions']))
+            total_loss += float(loss)
+            batches_processed += 1
     
     # Concatenate all batches
     all_predictions = np.concatenate(all_predictions, axis=0)
     all_targets = np.concatenate(all_targets, axis=0)
     
     # Compute metrics
-    avg_loss = total_loss / num_batches
+    avg_loss = total_loss / batches_processed
     accuracy = compute_accuracy(all_predictions, all_targets, threshold=0.5)
     per_action_metrics = compute_per_action_metrics(all_predictions, all_targets, threshold=0.5)
     dist_metrics = compute_action_distribution_distance(all_predictions, all_targets, threshold=0.5)
     
-    # Ensure all scalar values are Python floats, not numpy arrays
+    # Ensure all scalar values are Python floats
     metrics = {
-        'loss': avg_loss,
-        'accuracy': accuracy,
+        'loss': float(avg_loss),
+        'accuracy': float(accuracy) if hasattr(accuracy, '__float__') else accuracy,
         **per_action_metrics,
         **dist_metrics,
     }
-    
-    # Convert any numpy scalars to Python floats using .item()
-    for key in ['loss', 'accuracy', 'l1_distance', 'l2_distance', 'kl_divergence']:
-        if key in metrics:
-            val = metrics[key]
-            if isinstance(val, np.ndarray) and val.ndim == 0:
-                metrics[key] = val.item()
-            elif hasattr(val, 'item') and callable(val.item):
-                try:
-                    metrics[key] = val.item()
-                except:
-                    pass
     
     return metrics
 
@@ -372,8 +435,8 @@ def train(config_path: str):
         )
         console.print("[green]✓ Initialized WandB[/green]")
     
-    # Create checkpoint directory
-    checkpoint_dir = Path(config['training']['checkpoint_dir'])
+    # Create checkpoint directory (must be absolute path for orbax)
+    checkpoint_dir = Path(config['training']['checkpoint_dir']).resolve()
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
     console.print(f"[cyan]Checkpoint directory: {checkpoint_dir}[/cyan]")
     
@@ -518,7 +581,7 @@ def train(config_path: str):
             avg_train_accuracy = np.mean([m['accuracy'] for m in train_metrics])
             
             # Evaluation
-            if (epoch + 1) % config['evaluation']['eval_every_n_epochs'] == 0:
+            if (epoch + 0) % config['evaluation']['eval_every_n_epochs'] == 0:
                 progress.stop()  # Pause progress bar for evaluation output
                 
                 console.print(f"\n[bold yellow]Evaluating at epoch {epoch + 1}...[/bold yellow]")
@@ -529,7 +592,6 @@ def train(config_path: str):
                 table.add_column("Split", style="cyan")
                 table.add_column("Loss", justify="right")
                 table.add_column("Accuracy", justify="right")
-                
                 table.add_row("Train", f"{avg_train_loss:.4f}", f"{avg_train_accuracy:.4f}")
                 table.add_row("Val", f"{val_metrics['loss']:.4f}", f"{val_metrics['accuracy']:.4f}")
                 
@@ -557,23 +619,12 @@ def train(config_path: str):
                 # Save best model
                 if val_metrics['accuracy'] > best_val_accuracy:
                     best_val_accuracy = val_metrics['accuracy']
-                    checkpoints.save_checkpoint(
-                        ckpt_dir=str(checkpoint_dir),
-                        target=state,
-                        step=int(state.step),
-                        prefix='best_',
-                        keep=1,
-                    )
+                    save_checkpoint(checkpoint_dir, state, 'best')
                     console.print(f"[bold green]✓ Saved best model with val accuracy: {best_val_accuracy:.4f}[/bold green]")
             
             # Save periodic checkpoint
             if (epoch + 1) % config['training']['save_every_n_epochs'] == 0:
-                checkpoints.save_checkpoint(
-                    ckpt_dir=str(checkpoint_dir),
-                    target=state,
-                    step=epoch + 1,
-                    keep=config['training']['keep_last_n_checkpoints'],
-                )
+                save_checkpoint(checkpoint_dir, state, f'epoch_{epoch + 1}')
                 console.print(f"[cyan]Saved checkpoint at epoch {epoch + 1}[/cyan]")
             
             epoch_time = time.time() - epoch_start_time
