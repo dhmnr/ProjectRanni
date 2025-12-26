@@ -14,6 +14,13 @@ import optax
 from flax.training import train_state, checkpoints
 from omegaconf import OmegaConf
 import wandb
+from rich.console import Console
+from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn, TimeRemainingColumn, MofNCompleteColumn
+from rich.table import Table
+from rich.panel import Panel
+from rich.live import Live
+
+console = Console()
 
 # Add parent directory to path
 sys.path.append(str(Path(__file__).parent))
@@ -168,6 +175,23 @@ def binary_cross_entropy_with_logits(
     return jnp.mean(loss)
 
 
+def compute_accuracy_jax(predictions: jnp.ndarray, targets: jnp.ndarray, threshold: float = 0.5) -> jnp.ndarray:
+    """JAX-compatible accuracy computation for JIT.
+    
+    Args:
+        predictions: Predicted probabilities [N, num_actions]
+        targets: Ground truth binary labels [N, num_actions]
+        threshold: Threshold for binary classification
+        
+    Returns:
+        Accuracy as JAX scalar
+    """
+    pred_binary = (predictions > threshold).astype(jnp.float32)
+    # Exact match: all actions must match
+    exact_match = jnp.all(pred_binary == targets, axis=1)
+    return jnp.mean(exact_match)
+
+
 @jax.jit
 def train_step(state: TrainState, batch: Dict, action_weights: jnp.ndarray, rng):
     """Single training step.
@@ -220,9 +244,9 @@ def train_step(state: TrainState, batch: Dict, action_weights: jnp.ndarray, rng)
     if new_batch_stats is not None:
         state = state.replace(batch_stats=new_batch_stats)
     
-    # Compute metrics
+    # Compute metrics (using JAX arrays, no numpy conversion!)
     predictions = jax.nn.sigmoid(logits)
-    accuracy = compute_accuracy(np.array(predictions), np.array(batch['actions']))
+    accuracy = compute_accuracy_jax(predictions, batch['actions'])
     
     metrics = {
         'loss': loss,
@@ -315,8 +339,11 @@ def train(config_path: str):
     """
     # Load config
     config = OmegaConf.load(config_path)
-    logger.info(f"Loaded config from {config_path}")
-    logger.info(f"\n{OmegaConf.to_yaml(config)}")
+    console.print(f"[cyan]Loaded config from {config_path}[/cyan]")
+    
+    # Print config in a nice panel
+    config_text = OmegaConf.to_yaml(config)
+    console.print(Panel(config_text, title="[bold]Training Configuration[/bold]", expand=False))
     
     # Set random seed
     np.random.seed(config['system']['seed'])
@@ -330,12 +357,12 @@ def train(config_path: str):
             name=config['logging']['wandb_run_name'],
             config=OmegaConf.to_container(config, resolve=True),
         )
-        logger.info("Initialized WandB")
+        console.print("[green]✓ Initialized WandB[/green]")
     
     # Create checkpoint directory
     checkpoint_dir = Path(config['training']['checkpoint_dir'])
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
-    logger.info(f"Checkpoint directory: {checkpoint_dir}")
+    console.print(f"[cyan]Checkpoint directory: {checkpoint_dir}[/cyan]")
     
     # Split episodes
     dataset_path = config['dataset']['path']
@@ -350,7 +377,7 @@ def train(config_path: str):
     )
     
     # Load datasets
-    logger.info("Loading datasets...")
+    console.print("[cyan]Loading datasets...[/cyan]")
     train_dataset = ZarrGameplayDataset(
         dataset_path=dataset_path,
         episode_indices=train_indices,
@@ -370,9 +397,10 @@ def train(config_path: str):
     # Get action names
     action_names = train_dataset.action_keys
     num_actions = len(action_names)
-    logger.info(f"Action names: {action_names}")
+    console.print(f"[cyan]Actions ({num_actions}): {', '.join(action_names)}[/cyan]")
     
     # Compute action weights
+    console.print("[cyan]Computing action weights...[/cyan]")
     if config['training']['use_class_weights']:
         action_weights = train_dataset.compute_action_weights()
         action_weights = jnp.array(action_weights)
@@ -380,6 +408,7 @@ def train(config_path: str):
         action_weights = jnp.ones(num_actions)
     
     # Create model
+    console.print("[cyan]Creating model...[/cyan]")
     model_name = config['model']['name']
     if model_name == 'pure_cnn':
         from models.pure_cnn import create_model
@@ -396,9 +425,10 @@ def train(config_path: str):
     # Get input shape from dataset
     sample = train_dataset[0]
     input_shape = (config['training']['batch_size'],) + sample['frames'].shape
-    logger.info(f"Input shape: {input_shape}")
+    console.print(f"[cyan]Input shape: {input_shape}[/cyan]")
     
     # Create train state
+    console.print("[cyan]Initializing model parameters (this may take a moment)...[/cyan]")
     rng, init_rng = jax.random.split(rng)
     state = create_train_state(
         model=model,
@@ -407,89 +437,139 @@ def train(config_path: str):
         input_shape=input_shape,
         rng=init_rng,
     )
+    console.print("[green]✓ Model initialized and ready![/green]")
     
     # Training loop
-    logger.info("Starting training...")
+    console.print("\n[bold cyan]Starting training...[/bold cyan]")
     best_val_accuracy = 0.0
     
-    for epoch in range(config['training']['num_epochs']):
-        epoch_start_time = time.time()
+    # Calculate total steps
+    batch_size = config['training']['batch_size']
+    steps_per_epoch = len(train_dataset) // batch_size
+    
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        MofNCompleteColumn(),
+        TextColumn("•"),
+        TimeRemainingColumn(),
+        console=console,
+        expand=True,
+    ) as progress:
         
-        # Training
-        train_metrics = []
-        batch_size = config['training']['batch_size']
+        # Create progress bars
+        epoch_task = progress.add_task(
+            "[cyan]Epochs",
+            total=config['training']['num_epochs']
+        )
         
-        for step, batch in enumerate(create_data_loader(train_dataset, batch_size, shuffle=True)):
-            rng, step_rng = jax.random.split(rng)
-            state, metrics = train_step(state, batch, action_weights, step_rng)
-            train_metrics.append(metrics)
-            
-            # Log step metrics
-            if config['logging']['use_wandb'] and step % config['logging']['log_every_n_steps'] == 0:
-                wandb.log({
-                    'train/step_loss': float(metrics['loss']),
-                    'train/step_accuracy': float(metrics['accuracy']),
-                    'step': int(state.step),
-                })
+        batch_task = progress.add_task(
+            "[green]Batches",
+            total=steps_per_epoch
+        )
         
-        # Aggregate training metrics
-        avg_train_loss = np.mean([m['loss'] for m in train_metrics])
-        avg_train_accuracy = np.mean([m['accuracy'] for m in train_metrics])
-        
-        # Evaluation
-        if (epoch + 1) % config['evaluation']['eval_every_n_epochs'] == 0:
-            logger.info(f"Evaluating at epoch {epoch + 1}...")
-            val_metrics = evaluate(state, val_dataset, config)
+        for epoch in range(config['training']['num_epochs']):
+            epoch_start_time = time.time()
             
-            # Print metrics
-            print(f"\nEpoch {epoch + 1}/{config['training']['num_epochs']}")
-            print(f"Train Loss: {avg_train_loss:.4f}, Train Acc: {avg_train_accuracy:.4f}")
-            print(f"Val Loss: {val_metrics['loss']:.4f}, Val Acc: {val_metrics['accuracy']:.4f}")
+            # Reset batch progress
+            progress.reset(batch_task, total=steps_per_epoch, description=f"[green]Epoch {epoch+1} Batches")
             
-            print_metrics_summary(val_metrics, action_names, title=f"Validation Metrics (Epoch {epoch + 1})")
+            # Training
+            train_metrics = []
             
-            # Log to wandb
-            if config['logging']['use_wandb']:
-                log_dict = {
-                    'epoch': epoch + 1,
-                    'train/loss': avg_train_loss,
-                    'train/accuracy': avg_train_accuracy,
-                    'val/loss': val_metrics['loss'],
-                    'val/accuracy': val_metrics['accuracy'],
-                }
+            for step, batch in enumerate(create_data_loader(train_dataset, batch_size, shuffle=True)):
+                rng, step_rng = jax.random.split(rng)
+                state, metrics = train_step(state, batch, action_weights, step_rng)
+                train_metrics.append(metrics)
                 
-                # Add per-action metrics
-                per_action_log = format_metrics_for_logging(val_metrics, action_names, prefix='val/')
-                log_dict.update(per_action_log)
+                # Update progress bar with current metrics
+                current_loss = float(metrics['loss'])
+                current_acc = float(metrics['accuracy'])
+                progress.update(
+                    batch_task, 
+                    advance=1,
+                    description=f"[green]Epoch {epoch+1} │ Loss: {current_loss:.4f} │ Acc: {current_acc:.4f}"
+                )
                 
-                wandb.log(log_dict)
+                # Log step metrics
+                if config['logging']['use_wandb'] and step % config['logging']['log_every_n_steps'] == 0:
+                    wandb.log({
+                        'train/step_loss': float(metrics['loss']),
+                        'train/step_accuracy': float(metrics['accuracy']),
+                        'step': int(state.step),
+                    })
             
-            # Save best model
-            if val_metrics['accuracy'] > best_val_accuracy:
-                best_val_accuracy = val_metrics['accuracy']
+            # Aggregate training metrics
+            avg_train_loss = np.mean([m['loss'] for m in train_metrics])
+            avg_train_accuracy = np.mean([m['accuracy'] for m in train_metrics])
+            
+            # Evaluation
+            if (epoch + 1) % config['evaluation']['eval_every_n_epochs'] == 0:
+                progress.stop()  # Pause progress bar for evaluation output
+                
+                console.print(f"\n[bold yellow]Evaluating at epoch {epoch + 1}...[/bold yellow]")
+                val_metrics = evaluate(state, val_dataset, config)
+                
+                # Create summary table
+                table = Table(title=f"Epoch {epoch + 1}/{config['training']['num_epochs']} Summary", show_header=True, header_style="bold magenta")
+                table.add_column("Split", style="cyan")
+                table.add_column("Loss", justify="right")
+                table.add_column("Accuracy", justify="right")
+                
+                table.add_row("Train", f"{avg_train_loss:.4f}", f"{avg_train_accuracy:.4f}")
+                table.add_row("Val", f"{val_metrics['loss']:.4f}", f"{val_metrics['accuracy']:.4f}")
+                
+                console.print(table)
+                print_metrics_summary(val_metrics, action_names, title=f"Validation Metrics (Epoch {epoch + 1})")
+                
+                progress.start()  # Resume progress bar
+                
+                # Log to wandb
+                if config['logging']['use_wandb']:
+                    log_dict = {
+                        'epoch': epoch + 1,
+                        'train/loss': avg_train_loss,
+                        'train/accuracy': avg_train_accuracy,
+                        'val/loss': val_metrics['loss'],
+                        'val/accuracy': val_metrics['accuracy'],
+                    }
+                    
+                    # Add per-action metrics
+                    per_action_log = format_metrics_for_logging(val_metrics, action_names, prefix='val/')
+                    log_dict.update(per_action_log)
+                    
+                    wandb.log(log_dict)
+                
+                # Save best model
+                if val_metrics['accuracy'] > best_val_accuracy:
+                    best_val_accuracy = val_metrics['accuracy']
+                    checkpoints.save_checkpoint(
+                        ckpt_dir=str(checkpoint_dir),
+                        target=state,
+                        step=int(state.step),
+                        prefix='best_',
+                        keep=1,
+                    )
+                    console.print(f"[bold green]✓ Saved best model with val accuracy: {best_val_accuracy:.4f}[/bold green]")
+            
+            # Save periodic checkpoint
+            if (epoch + 1) % config['training']['save_every_n_epochs'] == 0:
                 checkpoints.save_checkpoint(
                     ckpt_dir=str(checkpoint_dir),
                     target=state,
-                    step=int(state.step),
-                    prefix='best_',
-                    keep=1,
+                    step=epoch + 1,
+                    keep=config['training']['keep_last_n_checkpoints'],
                 )
-                logger.info(f"Saved best model with val accuracy: {best_val_accuracy:.4f}")
-        
-        # Save periodic checkpoint
-        if (epoch + 1) % config['training']['save_every_n_epochs'] == 0:
-            checkpoints.save_checkpoint(
-                ckpt_dir=str(checkpoint_dir),
-                target=state,
-                step=epoch + 1,
-                keep=config['training']['keep_last_n_checkpoints'],
-            )
-            logger.info(f"Saved checkpoint at epoch {epoch + 1}")
-        
-        epoch_time = time.time() - epoch_start_time
-        logger.info(f"Epoch {epoch + 1} completed in {epoch_time:.2f}s")
+                console.print(f"[cyan]Saved checkpoint at epoch {epoch + 1}[/cyan]")
+            
+            epoch_time = time.time() - epoch_start_time
+            
+            # Update epoch progress
+            progress.update(epoch_task, advance=1)
     
-    logger.info("Training completed!")
+    console.print("\n[bold green]✓ Training completed![/bold green]")
+    console.print(f"[bold cyan]Best validation accuracy: {best_val_accuracy:.4f}[/bold cyan]")
     
     if config['logging']['use_wandb']:
         wandb.finish()
