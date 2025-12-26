@@ -221,3 +221,5 @@ data/
 recordings/
 dataset/
 .episode_counter
+
+wandb/
