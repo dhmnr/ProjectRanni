@@ -28,6 +28,7 @@ console = Console()
 sys.path.append(str(Path(__file__).parent))
 
 from common.dataset import ZarrGameplayDataset, create_data_loader, split_episodes
+from common.state_preprocessing import create_preprocessor
 from common.metrics import (
     compute_accuracy,
     compute_per_action_metrics,
@@ -109,6 +110,7 @@ def create_train_state(
     weight_decay: float,
     input_shape: tuple,
     rng,
+    state_shape: tuple = None,
 ) -> TrainState:
     """Initialize model and create train state.
     
@@ -116,19 +118,31 @@ def create_train_state(
         model: Flax model
         learning_rate: Learning rate
         weight_decay: Weight decay for AdamW
-        input_shape: Input shape for initialization
+        input_shape: Input shape for initialization (frames)
         rng: JAX random key
+        state_shape: Optional state input shape for hybrid models
         
     Returns:
         TrainState with initialized parameters
     """
     # Initialize model
     init_rng, dropout_rng = jax.random.split(rng)
-    variables = model.init(
-        {'params': init_rng, 'dropout': dropout_rng},
-        jnp.ones(input_shape),
-        training=False,
-    )
+    
+    if state_shape is not None:
+        # Hybrid model with state input
+        variables = model.init(
+            {'params': init_rng, 'dropout': dropout_rng},
+            jnp.ones(input_shape),  # frames
+            jnp.ones(state_shape),  # state
+            training=False,
+        )
+    else:
+        # Vision-only model
+        variables = model.init(
+            {'params': init_rng, 'dropout': dropout_rng},
+            jnp.ones(input_shape),
+            training=False,
+        )
     
     params = variables['params']
     batch_stats = variables.get('batch_stats', None)
@@ -249,12 +263,12 @@ def compute_accuracy_jax(predictions: jnp.ndarray, targets: jnp.ndarray, thresho
 
 
 @jax.jit
-def train_step(state: TrainState, batch: Dict, action_weights: jnp.ndarray, rng):
-    """Single training step.
+def train_step_vision(state: TrainState, batch: Dict, action_weights: jnp.ndarray, rng):
+    """Single training step for vision-only models.
     
     Args:
         state: TrainState
-        batch: Batch of data
+        batch: Batch of data (frames, actions)
         action_weights: Per-action loss weights
         rng: JAX random key
         
@@ -264,7 +278,6 @@ def train_step(state: TrainState, batch: Dict, action_weights: jnp.ndarray, rng)
     dropout_rng = jax.random.fold_in(rng, state.step)
     
     def loss_fn(params):
-        # Forward pass
         variables = {'params': params}
         if state.batch_stats is not None:
             variables['batch_stats'] = state.batch_stats
@@ -277,52 +290,82 @@ def train_step(state: TrainState, batch: Dict, action_weights: jnp.ndarray, rng)
             rngs={'dropout': dropout_rng},
         )
         
-        # Compute loss
         loss = binary_cross_entropy_with_logits(
             logits,
             batch['actions'],
             weights=action_weights,
         )
         
-        # Get updated batch stats
         new_batch_stats = new_variables.get('batch_stats', None)
-        
         return loss, (logits, new_batch_stats)
     
-    # Compute gradients
     grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
     (loss, (logits, new_batch_stats)), grads = grad_fn(state.params)
     
-    # Update parameters
     state = state.apply_gradients(grads=grads)
-    
-    # Update batch stats
     if new_batch_stats is not None:
         state = state.replace(batch_stats=new_batch_stats)
     
-    # Compute metrics (using JAX arrays, no numpy conversion!)
     predictions = jax.nn.sigmoid(logits)
     accuracy = compute_accuracy_jax(predictions, batch['actions'])
     
-    metrics = {
-        'loss': loss,
-        'accuracy': accuracy,
-    }
-    
-    return state, metrics
+    return state, {'loss': loss, 'accuracy': accuracy}
 
 
 @jax.jit
-def eval_step(state: TrainState, batch: Dict):
-    """Single evaluation step.
+def train_step_hybrid(state: TrainState, batch: Dict, action_weights: jnp.ndarray, rng):
+    """Single training step for hybrid models (vision + state).
     
     Args:
         state: TrainState
-        batch: Batch of data
+        batch: Batch of data (frames, state, actions)
+        action_weights: Per-action loss weights
+        rng: JAX random key
         
     Returns:
-        (predictions, loss)
+        (new_state, metrics)
     """
+    dropout_rng = jax.random.fold_in(rng, state.step)
+    
+    def loss_fn(params):
+        variables = {'params': params}
+        if state.batch_stats is not None:
+            variables['batch_stats'] = state.batch_stats
+        
+        logits, new_variables = state.apply_fn(
+            variables,
+            batch['frames'],
+            batch['state'],
+            training=True,
+            mutable=['batch_stats'] if state.batch_stats is not None else False,
+            rngs={'dropout': dropout_rng},
+        )
+        
+        loss = binary_cross_entropy_with_logits(
+            logits,
+            batch['actions'],
+            weights=action_weights,
+        )
+        
+        new_batch_stats = new_variables.get('batch_stats', None)
+        return loss, (logits, new_batch_stats)
+    
+    grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
+    (loss, (logits, new_batch_stats)), grads = grad_fn(state.params)
+    
+    state = state.apply_gradients(grads=grads)
+    if new_batch_stats is not None:
+        state = state.replace(batch_stats=new_batch_stats)
+    
+    predictions = jax.nn.sigmoid(logits)
+    accuracy = compute_accuracy_jax(predictions, batch['actions'])
+    
+    return state, {'loss': loss, 'accuracy': accuracy}
+
+
+@jax.jit
+def eval_step_vision(state: TrainState, batch: Dict):
+    """Single evaluation step for vision-only models."""
     variables = {'params': state.params}
     if state.batch_stats is not None:
         variables['batch_stats'] = state.batch_stats
@@ -334,7 +377,21 @@ def eval_step(state: TrainState, batch: Dict):
     return predictions, loss
 
 
-def evaluate(state: TrainState, dataset: ZarrGameplayDataset, config: Dict, show_progress: bool = True) -> Dict:
+@jax.jit
+def eval_step_hybrid(state: TrainState, batch: Dict):
+    """Single evaluation step for hybrid models (vision + state)."""
+    variables = {'params': state.params}
+    if state.batch_stats is not None:
+        variables['batch_stats'] = state.batch_stats
+    
+    logits = state.apply_fn(variables, batch['frames'], batch['state'], training=False)
+    loss = binary_cross_entropy_with_logits(logits, batch['actions'])
+    predictions = jax.nn.sigmoid(logits)
+    
+    return predictions, loss
+
+
+def evaluate(state: TrainState, dataset: ZarrGameplayDataset, config: Dict, show_progress: bool = True, use_state: bool = False) -> Dict:
     """Evaluate model on dataset with JIT-compiled steps and progress bar.
     
     Args:
@@ -342,11 +399,15 @@ def evaluate(state: TrainState, dataset: ZarrGameplayDataset, config: Dict, show
         dataset: Evaluation dataset
         config: Config dict
         show_progress: Whether to show progress bar
+        use_state: Whether model uses state features
         
     Returns:
         Dict of evaluation metrics
     """
     batch_size = config['training']['batch_size']
+    
+    # Select appropriate eval function
+    eval_fn = eval_step_hybrid if use_state else eval_step_vision
     
     # Pre-compute number of batches for progress bar
     total_samples = len(dataset)
@@ -370,7 +431,7 @@ def evaluate(state: TrainState, dataset: ZarrGameplayDataset, config: Dict, show
             task = progress.add_task("Eval", total=num_batches)
             
             for batch in create_data_loader(dataset, batch_size, shuffle=False, drop_last=False):
-                predictions, loss = eval_step(state, batch)
+                predictions, loss = eval_fn(state, batch)
                 
                 # Block until computation is done, then convert
                 all_predictions.append(np.asarray(predictions))
@@ -380,7 +441,7 @@ def evaluate(state: TrainState, dataset: ZarrGameplayDataset, config: Dict, show
                 progress.update(task, advance=1)
     else:
         for batch in create_data_loader(dataset, batch_size, shuffle=False, drop_last=False):
-            predictions, loss = eval_step(state, batch)
+            predictions, loss = eval_fn(state, batch)
             all_predictions.append(np.asarray(predictions))
             all_targets.append(np.asarray(batch['actions']))
             total_loss += float(loss)
@@ -454,12 +515,17 @@ def train(config_path: str):
     
     # Load datasets
     console.print("[cyan]Loading datasets...[/cyan]")
+    
+    # Create state preprocessor (used by all models with state)
+    state_preprocessor = create_preprocessor(config)
+    
     train_dataset = ZarrGameplayDataset(
         dataset_path=dataset_path,
         episode_indices=train_indices,
         use_state=config['dataset']['use_state'],
         normalize_frames=config['dataset']['normalize_frames'],
         validate_episodes=config['dataset'].get('validate_episodes', True),
+        state_preprocessor=state_preprocessor,
     )
     
     val_dataset = ZarrGameplayDataset(
@@ -468,6 +534,7 @@ def train(config_path: str):
         use_state=config['dataset']['use_state'],
         normalize_frames=config['dataset']['normalize_frames'],
         validate_episodes=config['dataset'].get('validate_episodes', True),
+        state_preprocessor=state_preprocessor,
     )
     
     # Get action names
@@ -486,12 +553,28 @@ def train(config_path: str):
     # Create model
     console.print("[cyan]Creating model...[/cyan]")
     model_name = config['model']['name']
+    use_state = config['dataset'].get('use_state', False)
+    
     if model_name == 'pure_cnn':
         from models.pure_cnn import create_model
         model = create_model(
             num_actions=num_actions,
             conv_features=tuple(config['model']['conv_features']),
             dense_features=tuple(config['model']['dense_features']),
+            dropout_rate=config['model']['dropout_rate'],
+            use_batch_norm=config['model']['use_batch_norm'],
+        )
+    elif model_name == 'hybrid_state':
+        from models.hybrid_state import create_model
+        num_state_features = state_preprocessor.output_dim
+        console.print(f"[cyan]State features (after preprocessing): {num_state_features}[/cyan]")
+        model = create_model(
+            num_actions=num_actions,
+            num_state_features=num_state_features,
+            conv_features=tuple(config['model']['conv_features']),
+            dense_features=tuple(config['model']['dense_features']),
+            state_encoder_features=tuple(config['model']['state_encoder_features']),
+            state_output_features=config['model']['state_output_features'],
             dropout_rate=config['model']['dropout_rate'],
             use_batch_norm=config['model']['use_batch_norm'],
         )
@@ -503,6 +586,12 @@ def train(config_path: str):
     input_shape = (config['training']['batch_size'],) + sample['frames'].shape
     console.print(f"[cyan]Input shape: {input_shape}[/cyan]")
     
+    # Get state shape if using state
+    state_shape = None
+    if use_state and 'state' in sample:
+        state_shape = (config['training']['batch_size'],) + sample['state'].shape
+        console.print(f"[cyan]State shape: {state_shape}[/cyan]")
+    
     # Create train state
     console.print("[cyan]Initializing model parameters (this may take a moment)...[/cyan]")
     rng, init_rng = jax.random.split(rng)
@@ -512,6 +601,7 @@ def train(config_path: str):
         weight_decay=config['training']['weight_decay'],
         input_shape=input_shape,
         rng=init_rng,
+        state_shape=state_shape,
     )
     console.print("[green]✓ Model initialized and ready![/green]")
     
@@ -522,6 +612,9 @@ def train(config_path: str):
     # Calculate total steps
     batch_size = config['training']['batch_size']
     steps_per_epoch = len(train_dataset) // batch_size
+    
+    # Select appropriate step functions based on model type
+    train_fn = train_step_hybrid if use_state else train_step_vision
     
     with Progress(
         SpinnerColumn(),
@@ -556,7 +649,7 @@ def train(config_path: str):
             
             for step, batch in enumerate(create_data_loader(train_dataset, batch_size, shuffle=True)):
                 rng, step_rng = jax.random.split(rng)
-                state, metrics = train_step(state, batch, action_weights, step_rng)
+                state, metrics = train_fn(state, batch, action_weights, step_rng)
                 train_metrics.append(metrics)
                 
                 # Update progress bar with current metrics
@@ -585,7 +678,7 @@ def train(config_path: str):
                 progress.stop()  # Pause progress bar for evaluation output
                 
                 console.print(f"\n[bold yellow]Evaluating at epoch {epoch + 1}...[/bold yellow]")
-                val_metrics = evaluate(state, val_dataset, config)
+                val_metrics = evaluate(state, val_dataset, config, use_state=use_state)
                 
                 # Create summary table
                 table = Table(title=f"Epoch {epoch + 1}/{config['training']['num_epochs']} Summary", show_header=True, header_style="bold magenta")

@@ -7,6 +7,8 @@ from pathlib import Path
 from typing import Dict, List, Tuple, Optional
 import logging
 
+from .state_preprocessing import StatePreprocessor, create_preprocessor
+
 logger = logging.getLogger(__name__)
 
 
@@ -26,6 +28,7 @@ class ZarrGameplayDataset:
         use_state: bool = False,
         normalize_frames: bool = True,
         validate_episodes: bool = True,
+        state_preprocessor: Optional[StatePreprocessor] = None,
     ):
         """Initialize dataset.
         
@@ -35,10 +38,12 @@ class ZarrGameplayDataset:
             use_state: Whether to include state features (not used in pure CNN)
             normalize_frames: Whether to normalize frames to [0, 1]
             validate_episodes: Whether to filter out episodes with mismatched shapes
+            state_preprocessor: Optional preprocessor for state features
         """
         self.dataset_path = Path(dataset_path)
         self.use_state = use_state
         self.normalize_frames = normalize_frames
+        self.state_preprocessor = state_preprocessor if state_preprocessor else create_preprocessor()
         
         # Open zarr dataset
         self.zarr_root = zarr.open(str(self.dataset_path), mode='r')
@@ -163,9 +168,10 @@ class ZarrGameplayDataset:
             'actions': actions,
         }
         
-        # Optionally load state
+        # Optionally load and preprocess state
         if self.use_state:
             state = np.array(ep['state'][frame_idx], dtype=np.float32)
+            state = self.state_preprocessor(state)
             result['state'] = state
         
         return result
@@ -198,7 +204,9 @@ class ZarrGameplayDataset:
         }
         
         if self.use_state:
-            result['state'] = np.array(ep['state'][:], dtype=np.float32)
+            state = np.array(ep['state'][:], dtype=np.float32)
+            state = self.state_preprocessor(state)
+            result['state'] = state
         
         return result
     
