@@ -14,7 +14,7 @@ dataset:
 # All false: 19 raw features (pass-through)
 # normalize_resources=true: 15 features (HP/SP/FP normalized to [0,1], max columns dropped)
 state_preprocessing:
-  normalize_resources: false  # HP/SP/FP divided by max values -> [0,1], drops max columns
+  normalize_resources: true  # HP/SP/FP divided by max values -> [0,1], drops max columns
   compute_distances: false   # TODO: Add distance to boss
   compute_relative_angles: false  # TODO: Add angle to boss
 
@@ -54,7 +54,7 @@ logging:
   use_wandb: true
   wandb_project: "ProjectRanni-BC"
   wandb_entity: "dhmnr-projects"
-  wandb_run_name: "hybrid_state_raw_baseline"
+  wandb_run_name: "hybrid_state_norm_baseline"
   log_every_n_steps: 50
   log_gradients: false
 
