@@ -44,16 +44,16 @@ class StatePreprocessor:
     Features:
     - Normalizes HP, SP, FP to [0, 1] using their max values
     - Computes relative position features (distance, direction to NPC)
-    - Drops useless angle columns (HeroAngle unreliable, NpcAngle stuck at 1)
+    - Drops useless columns: HeroAngle (unreliable), NpcAngle (stuck at 1), NpcId (useless)
     
     Usage:
         preprocessor = StatePreprocessor()
         processed_state = preprocessor(raw_state)
     
-    Output structure (with both options enabled = 13 features):
+    Output structure (with both options enabled = 12 features):
         Resources (4): hero_hp_ratio, hero_sp_ratio, hero_fp_ratio, npc_hp_ratio
         Distances (6): distance_xy, distance_3d, rel_x, rel_y, rel_z, angle_to_npc
-        IDs (3): hero_anim_id, npc_id, npc_anim_id
+        Anim IDs (2): hero_anim_id, npc_anim_id
     """
     
     def __init__(
@@ -124,9 +124,8 @@ class StatePreprocessor:
         npc_y = state[:, STATE_INDICES['NpcGlobalPosY']] + NPC_Y_OFFSET  # Apply 8-bit offset
         npc_z = state[:, STATE_INDICES['NpcGlobalPosZ']]
         
-        # IDs (keep as-is)
+        # Animation IDs (keep as-is, but drop NpcId - it leaks identity)
         hero_anim_id = state[:, STATE_INDICES['HeroAnimId']]
-        npc_id = state[:, STATE_INDICES['NpcId']]
         npc_anim_id = state[:, STATE_INDICES['NpcAnimId']]
         
         # Build output features
@@ -177,10 +176,9 @@ class StatePreprocessor:
                 npc_x, npc_y, npc_z,
             ])
         
-        # 3. Animation/identity IDs
+        # 3. Animation IDs (NpcId dropped - leaks identity info)
         features.extend([
             hero_anim_id,
-            npc_id,
             npc_anim_id,
         ])
         
@@ -199,7 +197,7 @@ class StatePreprocessor:
         Output structure:
         - Resources: 4 (normalized) or 8 (raw with max values)
         - Coordinates: 6 (derived: dist_xy, dist_3d, rel_x, rel_y, rel_z, angle) or 6 (raw: 3 hero + 3 npc)
-        - IDs: 3 (hero_anim, npc_id, npc_anim)
+        - IDs: 2 (hero_anim, npc_anim) - NpcId dropped
         
         Returns:
             Number of features after preprocessing
@@ -213,8 +211,8 @@ class StatePreprocessor:
         # Coordinates
         dim += 6  # Either derived (dist_xy, dist_3d, rel_x, rel_y, rel_z, angle) or raw (6 coords)
         
-        # IDs
-        dim += 3  # hero_anim_id, npc_id, npc_anim_id
+        # Animation IDs (NpcId dropped - leaks identity)
+        dim += 2  # hero_anim_id, npc_anim_id
         
         return dim
     
@@ -235,8 +233,8 @@ class StatePreprocessor:
         else:
             names.extend(['hero_x', 'hero_y', 'hero_z', 'npc_x', 'npc_y', 'npc_z'])
         
-        # IDs
-        names.extend(['hero_anim_id', 'npc_id', 'npc_anim_id'])
+        # Animation IDs (NpcId dropped)
+        names.extend(['hero_anim_id', 'npc_anim_id'])
         
         return names
 
