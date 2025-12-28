@@ -11,12 +11,14 @@ dataset:
   validate_episodes: true
 
 # State preprocessing (applied to all models using state)
-# Output: resources (4 or 8) + coords (6) + IDs (3) = 13 or 17 features
-# normalize_resources=true: 4 resource ratios (HP/SP/FP normalized to [0,1])
-# compute_distances=true: 6 derived features (distance_xy, distance_3d, rel_x/y/z, angle_to_npc)
+# Output structure:
+#   - Continuous (10): resources (4 normalized) + distances (6)
+#   - Embeddings: hero_anim (vocab 67, +1 UNK) + npc_anim (vocab 54, +1 UNK)
 state_preprocessing:
   normalize_resources: true   # HP/SP/FP divided by max values -> [0,1]
   compute_distances: true     # Replace raw coords with: distance, relative pos, angle to NPC
+  anim_embed_dim: 16          # Dimension of animation embeddings
+  # Animation ID mappings auto-loaded from dataset/anim_id_mappings.json
 
 model:
   name: hybrid_state
@@ -54,7 +56,7 @@ logging:
   use_wandb: true
   wandb_project: "ProjectRanni-BC"
   wandb_entity: "dhmnr-projects"
-  wandb_run_name: "hybrid_state_with_distances"
+  wandb_run_name: "hybrid_state_with_anim_embed"
   log_every_n_steps: 50
   log_gradients: false
 

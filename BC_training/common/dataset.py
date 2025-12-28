@@ -171,8 +171,10 @@ class ZarrGameplayDataset:
         # Optionally load and preprocess state
         if self.use_state:
             state = np.array(ep['state'][frame_idx], dtype=np.float32)
-            state = self.state_preprocessor(state)
-            result['state'] = state
+            processed = self.state_preprocessor(state)
+            result['state'] = processed['continuous']
+            result['hero_anim_idx'] = processed['hero_anim_idx']
+            result['npc_anim_idx'] = processed['npc_anim_idx']
         
         return result
     
@@ -205,8 +207,10 @@ class ZarrGameplayDataset:
         
         if self.use_state:
             state = np.array(ep['state'][:], dtype=np.float32)
-            state = self.state_preprocessor(state)
-            result['state'] = state
+            processed = self.state_preprocessor(state)
+            result['state'] = processed['continuous']
+            result['hero_anim_idx'] = processed['hero_anim_idx']
+            result['npc_anim_idx'] = processed['npc_anim_idx']
         
         return result
     
@@ -278,6 +282,8 @@ def create_data_loader(
         
         if dataset.use_state:
             batch['state'] = np.stack([d['state'] for d in batch_data])
+            batch['hero_anim_idx'] = np.stack([d['hero_anim_idx'] for d in batch_data])
+            batch['npc_anim_idx'] = np.stack([d['npc_anim_idx'] for d in batch_data])
         
         yield batch
 

@@ -111,6 +111,7 @@ def create_train_state(
     input_shape: tuple,
     rng,
     state_shape: tuple = None,
+    use_anim_embeddings: bool = False,
 ) -> TrainState:
     """Initialize model and create train state.
     
@@ -121,6 +122,7 @@ def create_train_state(
         input_shape: Input shape for initialization (frames)
         rng: JAX random key
         state_shape: Optional state input shape for hybrid models
+        use_anim_embeddings: Whether model uses animation embeddings
         
     Returns:
         TrainState with initialized parameters
@@ -128,14 +130,27 @@ def create_train_state(
     # Initialize model
     init_rng, dropout_rng = jax.random.split(rng)
     
+    batch_size = input_shape[0]
+    
     if state_shape is not None:
-        # Hybrid model with state input
-        variables = model.init(
-            {'params': init_rng, 'dropout': dropout_rng},
-            jnp.ones(input_shape),  # frames
-            jnp.ones(state_shape),  # state
-            training=False,
-        )
+        if use_anim_embeddings:
+            # Hybrid model with state + animation embeddings
+            variables = model.init(
+                {'params': init_rng, 'dropout': dropout_rng},
+                jnp.ones(input_shape),                      # frames
+                jnp.ones(state_shape),                      # continuous state
+                jnp.zeros((batch_size,), dtype=jnp.int32),  # hero_anim_idx
+                jnp.zeros((batch_size,), dtype=jnp.int32),  # npc_anim_idx
+                training=False,
+            )
+        else:
+            # Hybrid model with state input only (legacy)
+            variables = model.init(
+                {'params': init_rng, 'dropout': dropout_rng},
+                jnp.ones(input_shape),  # frames
+                jnp.ones(state_shape),  # state
+                training=False,
+            )
     else:
         # Vision-only model
         variables = model.init(
@@ -314,11 +329,11 @@ def train_step_vision(state: TrainState, batch: Dict, action_weights: jnp.ndarra
 
 @jax.jit
 def train_step_hybrid(state: TrainState, batch: Dict, action_weights: jnp.ndarray, rng):
-    """Single training step for hybrid models (vision + state).
+    """Single training step for hybrid models (vision + state + anim embeddings).
     
     Args:
         state: TrainState
-        batch: Batch of data (frames, state, actions)
+        batch: Batch of data (frames, state, hero_anim_idx, npc_anim_idx, actions)
         action_weights: Per-action loss weights
         rng: JAX random key
         
@@ -336,6 +351,8 @@ def train_step_hybrid(state: TrainState, batch: Dict, action_weights: jnp.ndarra
             variables,
             batch['frames'],
             batch['state'],
+            batch['hero_anim_idx'],
+            batch['npc_anim_idx'],
             training=True,
             mutable=['batch_stats'] if state.batch_stats is not None else False,
             rngs={'dropout': dropout_rng},
@@ -379,12 +396,19 @@ def eval_step_vision(state: TrainState, batch: Dict):
 
 @jax.jit
 def eval_step_hybrid(state: TrainState, batch: Dict):
-    """Single evaluation step for hybrid models (vision + state)."""
+    """Single evaluation step for hybrid models (vision + state + anim embeddings)."""
     variables = {'params': state.params}
     if state.batch_stats is not None:
         variables['batch_stats'] = state.batch_stats
     
-    logits = state.apply_fn(variables, batch['frames'], batch['state'], training=False)
+    logits = state.apply_fn(
+        variables, 
+        batch['frames'], 
+        batch['state'],
+        batch['hero_anim_idx'],
+        batch['npc_anim_idx'],
+        training=False
+    )
     loss = binary_cross_entropy_with_logits(logits, batch['actions'])
     predictions = jax.nn.sigmoid(logits)
     
@@ -566,11 +590,20 @@ def train(config_path: str):
         )
     elif model_name == 'hybrid_state':
         from models.hybrid_state import create_model
-        num_state_features = state_preprocessor.output_dim
-        console.print(f"[cyan]State features (after preprocessing): {num_state_features}[/cyan]")
+        num_state_features = state_preprocessor.continuous_dim
+        console.print(f"[cyan]Continuous state features: {num_state_features}[/cyan]")
+        console.print(f"[cyan]Hero anim vocab size: {state_preprocessor.hero_vocab_size}[/cyan]")
+        console.print(f"[cyan]NPC anim vocab size: {state_preprocessor.npc_vocab_size}[/cyan]")
+        
+        # Get embedding config
+        anim_embed_dim = config.get('state_preprocessing', {}).get('anim_embed_dim', 16)
+        
         model = create_model(
             num_actions=num_actions,
             num_state_features=num_state_features,
+            hero_anim_vocab_size=state_preprocessor.hero_vocab_size,
+            npc_anim_vocab_size=state_preprocessor.npc_vocab_size,
+            anim_embed_dim=anim_embed_dim,
             conv_features=tuple(config['model']['conv_features']),
             dense_features=tuple(config['model']['dense_features']),
             state_encoder_features=tuple(config['model']['state_encoder_features']),
@@ -595,6 +628,10 @@ def train(config_path: str):
     # Create train state
     console.print("[cyan]Initializing model parameters (this may take a moment)...[/cyan]")
     rng, init_rng = jax.random.split(rng)
+    
+    # Hybrid state models use animation embeddings
+    use_anim_embeddings = (model_name == 'hybrid_state')
+    
     state = create_train_state(
         model=model,
         learning_rate=config['training']['learning_rate'],
@@ -602,6 +639,7 @@ def train(config_path: str):
         input_shape=input_shape,
         rng=init_rng,
         state_shape=state_shape,
+        use_anim_embeddings=use_anim_embeddings,
     )
     console.print("[green]✓ Model initialized and ready![/green]")
     
