@@ -5,8 +5,7 @@ Used by all models that consume state data.
 """
 
 import numpy as np
-import jax.numpy as jnp
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Optional
 import logging
 
 logger = logging.getLogger(__name__)
@@ -35,52 +34,50 @@ STATE_INDICES = {
     'NpcAnimId': 18,
 }
 
+# NPC Y coordinate offset (discovered empirically - 8 bits)
+NPC_Y_OFFSET = -8.0
+
 
 class StatePreprocessor:
     """Preprocesses raw game state into normalized features.
     
     Features:
-    - Normalizes HP, SP, FP to [0, 1] using their max values (and drops max columns)
-    - Extensible for additional preprocessing (distance, angles, etc.)
+    - Normalizes HP, SP, FP to [0, 1] using their max values
+    - Computes relative position features (distance, direction to NPC)
+    - Drops useless angle columns (HeroAngle unreliable, NpcAngle stuck at 1)
     
     Usage:
         preprocessor = StatePreprocessor()
         processed_state = preprocessor(raw_state)
     
-    Output dimensions:
-        - All options False: 19 features (raw state, pass-through)
-        - normalize_resources=True: 15 features (drops 4 max columns)
+    Output structure (with both options enabled = 13 features):
+        Resources (4): hero_hp_ratio, hero_sp_ratio, hero_fp_ratio, npc_hp_ratio
+        Distances (6): distance_xy, distance_3d, rel_x, rel_y, rel_z, angle_to_npc
+        IDs (3): hero_anim_id, npc_id, npc_anim_id
     """
-    
-    # Indices of max value columns to drop after normalization
-    MAX_VALUE_INDICES = [
-        STATE_INDICES['HeroMaxHp'],   # 1
-        STATE_INDICES['HeroMaxSp'],   # 3
-        STATE_INDICES['HeroMaxFp'],   # 5
-        STATE_INDICES['NpcMaxHp'],    # 12
-    ]
     
     def __init__(
         self,
         normalize_resources: bool = True,
         compute_distances: bool = False,
-        compute_relative_angles: bool = False,
     ):
         """Initialize preprocessor.
         
         Args:
             normalize_resources: Normalize HP/SP/FP by max values and drop max columns
-            compute_distances: Add distance features (TODO)
-            compute_relative_angles: Add relative angle features (TODO)
+            compute_distances: Replace raw coordinates with derived features:
+                - distance_xy: 2D distance to NPC on ground plane
+                - distance_3d: 3D Euclidean distance to NPC
+                - rel_x, rel_y, rel_z: Relative position of NPC to hero
+                - angle_to_npc: Computed angle from hero to NPC (radians)
+                Also drops: HeroAngle (unreliable), NpcGlobalPosAngle (stuck at 1)
         """
         self.normalize_resources = normalize_resources
         self.compute_distances = compute_distances
-        self.compute_relative_angles = compute_relative_angles
         
         logger.info(f"StatePreprocessor initialized:")
         logger.info(f"  normalize_resources: {normalize_resources}")
         logger.info(f"  compute_distances: {compute_distances}")
-        logger.info(f"  compute_relative_angles: {compute_relative_angles}")
         logger.info(f"  output_dim: {self.output_dim}")
     
     def __call__(self, state: np.ndarray) -> np.ndarray:
@@ -108,129 +105,140 @@ class StatePreprocessor:
         if single_sample:
             state = state[np.newaxis, :]
         
-        processed = state.copy()
+        # Extract all values from original indices FIRST
+        # Resources
+        hero_hp = state[:, STATE_INDICES['HeroHp']]
+        hero_max_hp = np.maximum(state[:, STATE_INDICES['HeroMaxHp']], 1.0)
+        hero_sp = state[:, STATE_INDICES['HeroSp']]
+        hero_max_sp = np.maximum(state[:, STATE_INDICES['HeroMaxSp']], 1.0)
+        hero_fp = state[:, STATE_INDICES['HeroFp']]
+        hero_max_fp = np.maximum(state[:, STATE_INDICES['HeroMaxFp']], 1.0)
+        npc_hp = state[:, STATE_INDICES['NpcHp']]
+        npc_max_hp = np.maximum(state[:, STATE_INDICES['NpcMaxHp']], 1.0)
         
+        # Coordinates
+        hero_x = state[:, STATE_INDICES['HeroGlobalPosX']]
+        hero_y = state[:, STATE_INDICES['HeroGlobalPosY']]
+        hero_z = state[:, STATE_INDICES['HeroGlobalPosZ']]
+        npc_x = state[:, STATE_INDICES['NpcGlobalPosX']]
+        npc_y = state[:, STATE_INDICES['NpcGlobalPosY']] + NPC_Y_OFFSET  # Apply 8-bit offset
+        npc_z = state[:, STATE_INDICES['NpcGlobalPosZ']]
+        
+        # IDs (keep as-is)
+        hero_anim_id = state[:, STATE_INDICES['HeroAnimId']]
+        npc_id = state[:, STATE_INDICES['NpcId']]
+        npc_anim_id = state[:, STATE_INDICES['NpcAnimId']]
+        
+        # Build output features
+        features = []
+        
+        # 1. Resources (normalized or raw)
         if self.normalize_resources:
-            processed = self._normalize_resources(processed)
+            features.extend([
+                hero_hp / hero_max_hp,
+                hero_sp / hero_max_sp,
+                hero_fp / hero_max_fp,
+                npc_hp / npc_max_hp,
+            ])
+        else:
+            features.extend([
+                hero_hp, hero_max_hp,
+                hero_sp, hero_max_sp,
+                hero_fp, hero_max_fp,
+                npc_hp, npc_max_hp,
+            ])
         
+        # 2. Coordinates (derived or raw)
         if self.compute_distances:
-            processed = self._add_distance_features(processed)
+            # Relative position
+            rel_x = npc_x - hero_x
+            rel_y = npc_y - hero_y
+            rel_z = npc_z - hero_z
+            
+            # Distances
+            distance_xy = np.sqrt(rel_x**2 + rel_y**2)
+            distance_3d = np.sqrt(rel_x**2 + rel_y**2 + rel_z**2)
+            
+            # Computed angle from hero to NPC (in radians, [-pi, pi])
+            angle_to_npc = np.arctan2(rel_y, rel_x)
+            
+            features.extend([
+                distance_xy,
+                distance_3d,
+                rel_x,
+                rel_y,
+                rel_z,
+                angle_to_npc,
+            ])
+        else:
+            # Raw coordinates (no angles - they're useless)
+            features.extend([
+                hero_x, hero_y, hero_z,
+                npc_x, npc_y, npc_z,
+            ])
         
-        if self.compute_relative_angles:
-            processed = self._add_angle_features(processed)
+        # 3. Animation/identity IDs
+        features.extend([
+            hero_anim_id,
+            npc_id,
+            npc_anim_id,
+        ])
+        
+        # Stack into [B, num_features]
+        processed = np.stack(features, axis=1)
         
         if single_sample:
             processed = processed[0]
         
         return processed
     
-    def _normalize_resources(self, state: np.ndarray) -> np.ndarray:
-        """Normalize HP, SP, FP by their max values, then drop max columns.
-        
-        Replaces raw values with ratios in [0, 1]:
-        - HeroHp -> HeroHp / HeroMaxHp
-        - HeroSp -> HeroSp / HeroMaxSp  
-        - HeroFp -> HeroFp / HeroMaxFp
-        - NpcHp -> NpcHp / NpcMaxHp
-        
-        Then drops the max columns (HeroMaxHp, HeroMaxSp, HeroMaxFp, NpcMaxHp)
-        reducing features from 19 to 15.
-        
-        Args:
-            state: State array [B, num_features]
-            
-        Returns:
-            State with normalized resource values and max columns dropped
-        """
-        result = state.copy()
-        
-        # Hero HP ratio
-        hp_idx = STATE_INDICES['HeroHp']
-        max_hp_idx = STATE_INDICES['HeroMaxHp']
-        max_hp = np.maximum(result[:, max_hp_idx], 1.0)  # Avoid division by zero
-        result[:, hp_idx] = result[:, hp_idx] / max_hp
-        
-        # Hero SP (stamina) ratio
-        sp_idx = STATE_INDICES['HeroSp']
-        max_sp_idx = STATE_INDICES['HeroMaxSp']
-        max_sp = np.maximum(result[:, max_sp_idx], 1.0)
-        result[:, sp_idx] = result[:, sp_idx] / max_sp
-        
-        # Hero FP (mana) ratio
-        fp_idx = STATE_INDICES['HeroFp']
-        max_fp_idx = STATE_INDICES['HeroMaxFp']
-        max_fp = np.maximum(result[:, max_fp_idx], 1.0)
-        result[:, fp_idx] = result[:, fp_idx] / max_fp
-        
-        # NPC HP ratio
-        npc_hp_idx = STATE_INDICES['NpcHp']
-        npc_max_hp_idx = STATE_INDICES['NpcMaxHp']
-        npc_max_hp = np.maximum(result[:, npc_max_hp_idx], 1.0)
-        result[:, npc_hp_idx] = result[:, npc_hp_idx] / npc_max_hp
-        
-        # Drop max value columns (keep all columns except the max indices)
-        keep_indices = [i for i in range(result.shape[1]) if i not in self.MAX_VALUE_INDICES]
-        result = result[:, keep_indices]
-        
-        return result
-    
-    def _add_distance_features(self, state: np.ndarray) -> np.ndarray:
-        """Add distance-based features.
-        
-        TODO: Compute distance between hero and NPC
-        
-        Args:
-            state: State array [B, num_features]
-            
-        Returns:
-            State with distance features appended
-        """
-        # TODO: Implement when needed
-        # hero_pos = state[:, [STATE_INDICES['HeroGlobalPosX'], 
-        #                      STATE_INDICES['HeroGlobalPosY'],
-        #                      STATE_INDICES['HeroGlobalPosZ']]]
-        # npc_pos = state[:, [STATE_INDICES['NpcGlobalPosX'],
-        #                     STATE_INDICES['NpcGlobalPosY'], 
-        #                     STATE_INDICES['NpcGlobalPosZ']]]
-        # distance = np.linalg.norm(hero_pos - npc_pos, axis=1, keepdims=True)
-        # return np.concatenate([state, distance], axis=1)
-        return state
-    
-    def _add_angle_features(self, state: np.ndarray) -> np.ndarray:
-        """Add relative angle features.
-        
-        TODO: Compute angle between hero facing and NPC direction
-        
-        Args:
-            state: State array [B, num_features]
-            
-        Returns:
-            State with angle features appended
-        """
-        # TODO: Implement when needed
-        return state
-    
     @property
     def output_dim(self) -> int:
         """Get output dimension after preprocessing.
         
+        Output structure:
+        - Resources: 4 (normalized) or 8 (raw with max values)
+        - Coordinates: 6 (derived: dist_xy, dist_3d, rel_x, rel_y, rel_z, angle) or 6 (raw: 3 hero + 3 npc)
+        - IDs: 3 (hero_anim, npc_id, npc_anim)
+        
         Returns:
             Number of features after preprocessing
         """
-        base_dim = len(STATE_INDICES)  # 19
-        
-        # Drop max columns if normalizing
+        # Resources
         if self.normalize_resources:
-            base_dim -= len(self.MAX_VALUE_INDICES)  # 19 - 4 = 15
+            dim = 4  # hero_hp, hero_sp, hero_fp, npc_hp (all normalized)
+        else:
+            dim = 8  # hero_hp, hero_max_hp, hero_sp, hero_max_sp, hero_fp, hero_max_fp, npc_hp, npc_max_hp
         
-        extra_dim = 0
+        # Coordinates
+        dim += 6  # Either derived (dist_xy, dist_3d, rel_x, rel_y, rel_z, angle) or raw (6 coords)
+        
+        # IDs
+        dim += 3  # hero_anim_id, npc_id, npc_anim_id
+        
+        return dim
+    
+    def get_feature_names(self) -> list:
+        """Get names of output features for debugging/logging."""
+        names = []
+        
+        # Resources
+        if self.normalize_resources:
+            names.extend(['hero_hp_ratio', 'hero_sp_ratio', 'hero_fp_ratio', 'npc_hp_ratio'])
+        else:
+            names.extend(['hero_hp', 'hero_max_hp', 'hero_sp', 'hero_max_sp', 
+                         'hero_fp', 'hero_max_fp', 'npc_hp', 'npc_max_hp'])
+        
+        # Coordinates
         if self.compute_distances:
-            extra_dim += 1  # distance to NPC
+            names.extend(['distance_xy', 'distance_3d', 'rel_x', 'rel_y', 'rel_z', 'angle_to_npc'])
+        else:
+            names.extend(['hero_x', 'hero_y', 'hero_z', 'npc_x', 'npc_y', 'npc_z'])
         
-        if self.compute_relative_angles:
-            extra_dim += 1  # relative angle
+        # IDs
+        names.extend(['hero_anim_id', 'npc_id', 'npc_anim_id'])
         
-        return base_dim + extra_dim
+        return names
 
 
 def create_preprocessor(config: Optional[Dict] = None) -> StatePreprocessor:
@@ -250,6 +258,5 @@ def create_preprocessor(config: Optional[Dict] = None) -> StatePreprocessor:
     return StatePreprocessor(
         normalize_resources=preprocess_config.get('normalize_resources', True),
         compute_distances=preprocess_config.get('compute_distances', False),
-        compute_relative_angles=preprocess_config.get('compute_relative_angles', False),
     )
 
