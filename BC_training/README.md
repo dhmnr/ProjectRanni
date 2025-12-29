@@ -19,6 +19,16 @@ BC_training/
 └── requirements.txt     # Python dependencies
 ```
 
+## Quick Setup (Cloud/Pod)
+
+One-liner to set up a fresh training environment:
+
+```bash
+curl -sSL https://raw.githubusercontent.com/dhmnr/ProjectRanni/main/BC_training/setup_pod.sh | bash
+```
+
+This clones the repo, installs uv and dependencies (including JAX with CUDA), downloads the dataset, and configures WandB.
+
 ## Installation
 
 ```bash
