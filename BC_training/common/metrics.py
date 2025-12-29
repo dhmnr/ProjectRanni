@@ -2,7 +2,7 @@
 
 import numpy as np
 import jax.numpy as jnp
-from typing import Dict, List
+from typing import Dict, List, Optional
 import logging
 
 logger = logging.getLogger(__name__)
@@ -106,34 +106,174 @@ def compute_action_distribution_distance(
     }
 
 
+def compute_onset_metrics(
+    predictions: np.ndarray,
+    targets: np.ndarray,
+    previous_actions: np.ndarray,
+    threshold: float = 0.5,
+) -> Dict[str, float]:
+    """Compute metrics on action ONSET frames (where action changes from previous).
+    
+    This is the key metric to detect if model is just copying previous actions.
+    A model that copies will have low onset accuracy.
+    
+    Args:
+        predictions: Predicted probabilities [N, num_actions]
+        targets: Ground truth binary labels [N, num_actions] (current frame)
+        previous_actions: Actions from previous frame [N, num_actions]
+        threshold: Threshold for binary classification
+        
+    Returns:
+        Dict with onset-specific metrics
+    """
+    pred_binary = (predictions > threshold).astype(np.float32)
+    targets = targets.astype(np.float32)
+    previous_actions = previous_actions.astype(np.float32)
+    
+    # Find frames where ANY action changed from previous
+    action_changed = ~np.all(targets == previous_actions, axis=1)  # [N]
+    num_onset_frames = np.sum(action_changed)
+    
+    if num_onset_frames == 0:
+        return {
+            'onset_accuracy': 0.0,
+            'onset_count': 0,
+            'onset_ratio': 0.0,
+            'per_action_onset_accuracy': np.zeros(targets.shape[1]),
+            'per_action_onset_recall': np.zeros(targets.shape[1]),
+        }
+    
+    # Filter to onset frames only
+    onset_preds = pred_binary[action_changed]
+    onset_targets = targets[action_changed]
+    onset_previous = previous_actions[action_changed]
+    
+    # Exact match accuracy on onset frames
+    exact_match = np.all(onset_preds == onset_targets, axis=1)
+    onset_accuracy = np.mean(exact_match)
+    
+    # Per-action onset metrics
+    num_actions = targets.shape[1]
+    per_action_onset_acc = np.zeros(num_actions)
+    per_action_onset_recall = np.zeros(num_actions)
+    
+    for i in range(num_actions):
+        # Frames where THIS action changed
+        action_i_changed = onset_targets[:, i] != onset_previous[:, i]
+        if np.sum(action_i_changed) > 0:
+            # Accuracy: when action changed, did we predict correctly?
+            correct = onset_preds[action_i_changed, i] == onset_targets[action_i_changed, i]
+            per_action_onset_acc[i] = np.mean(correct)
+            
+            # Recall for action START: when action turned ON, did we predict ON?
+            action_started = (onset_previous[:, i] == 0) & (onset_targets[:, i] == 1)
+            if np.sum(action_started) > 0:
+                recalled = onset_preds[action_started, i] == 1
+                per_action_onset_recall[i] = np.mean(recalled)
+    
+    return {
+        'onset_accuracy': float(onset_accuracy),
+        'onset_count': int(num_onset_frames),
+        'onset_ratio': float(num_onset_frames / len(targets)),
+        'per_action_onset_accuracy': per_action_onset_acc,
+        'per_action_onset_recall': per_action_onset_recall,  # Key metric!
+    }
+
+
+def compute_aggregate_metrics(per_action_metrics: Dict[str, np.ndarray]) -> Dict[str, float]:
+    """Compute aggregate (mean) metrics from per-action metrics.
+    
+    Args:
+        per_action_metrics: Dict with per-action metric arrays
+        
+    Returns:
+        Dict with aggregated scalar metrics
+    """
+    agg = {}
+    for key, values in per_action_metrics.items():
+        if isinstance(values, np.ndarray) and values.ndim == 1:
+            agg[f'{key}_mean'] = float(np.mean(values))
+            agg[f'{key}_std'] = float(np.std(values))
+            agg[f'{key}_min'] = float(np.min(values))
+            agg[f'{key}_max'] = float(np.max(values))
+    return agg
+
+
 def format_metrics_for_logging(
     metrics: Dict[str, np.ndarray],
     action_names: List[str],
     prefix: str = "",
 ) -> Dict[str, float]:
-    """Format per-action metrics for WandB logging.
+    """Format metrics for WandB logging with proper grouping.
+    
+    Groups:
+        - {prefix}aggregate/  - Mean, std, min, max of per-action metrics
+        - {prefix}per_action/{action_name}/  - Per-action breakdown
+        - {prefix}onset/  - Onset-specific metrics (if present)
+        - {prefix}distribution/  - Distribution distance metrics
     
     Args:
         metrics: Dict with per-action metric arrays
         action_names: List of action names
-        prefix: Prefix for metric names (e.g., 'train/', 'val/')
+        prefix: Prefix for metric names (e.g., 'val/')
         
     Returns:
         Flattened dict for logging
     """
     log_dict = {}
     
+    # Separate metrics by type
+    per_action_metrics = {}
+    onset_metrics = {}
+    distribution_metrics = {}
+    scalar_metrics = {}
+    
     for metric_name, values in metrics.items():
+        if 'onset' in metric_name:
+            onset_metrics[metric_name] = values
+        elif metric_name in ['l1_distance', 'l2_distance', 'kl_divergence', 'pred_freq', 'target_freq']:
+            distribution_metrics[metric_name] = values
+        elif isinstance(values, np.ndarray) and values.ndim == 1 and len(values) == len(action_names):
+            per_action_metrics[metric_name] = values
+        elif np.isscalar(values) or (isinstance(values, np.ndarray) and values.ndim == 0):
+            scalar_metrics[metric_name] = values
+    
+    # Log scalar metrics directly
+    for metric_name, value in scalar_metrics.items():
+        log_dict[f"{prefix}{metric_name}"] = float(value)
+    
+    # Log per-action metrics with grouping
+    for metric_name, values in per_action_metrics.items():
+        # Clean up metric name (remove 'per_action_' prefix for cleaner logging)
+        clean_name = metric_name.replace('per_action_', '')
+        
+        # Aggregate stats
+        log_dict[f"{prefix}aggregate/{clean_name}_mean"] = float(np.mean(values))
+        log_dict[f"{prefix}aggregate/{clean_name}_std"] = float(np.std(values))
+        
+        # Per-action breakdown
+        for i, action_name in enumerate(action_names):
+            log_dict[f"{prefix}per_action/{action_name}/{clean_name}"] = float(values[i])
+    
+    # Log onset metrics
+    for metric_name, values in onset_metrics.items():
         if isinstance(values, np.ndarray) and values.ndim == 1:
-            # Per-action metrics
+            # Per-action onset metrics
+            clean_name = metric_name.replace('per_action_', '')
+            log_dict[f"{prefix}onset/{clean_name}_mean"] = float(np.mean(values))
             for i, action_name in enumerate(action_names):
-                key = f"{prefix}{metric_name}/{action_name}"
-                log_dict[key] = float(values[i])
-            # Also log mean
-            log_dict[f"{prefix}{metric_name}/mean"] = float(np.mean(values))
+                log_dict[f"{prefix}onset/{action_name}/{clean_name}"] = float(values[i])
         else:
-            # Scalar metrics
-            log_dict[f"{prefix}{metric_name}"] = float(values)
+            # Scalar onset metrics
+            log_dict[f"{prefix}onset/{metric_name}"] = float(values) if not isinstance(values, (int, float)) else values
+    
+    # Log distribution metrics
+    for metric_name, values in distribution_metrics.items():
+        if isinstance(values, np.ndarray):
+            for i, action_name in enumerate(action_names):
+                log_dict[f"{prefix}distribution/{action_name}/{metric_name}"] = float(values[i])
+        else:
+            log_dict[f"{prefix}distribution/{metric_name}"] = float(values)
     
     return log_dict
 
@@ -150,13 +290,13 @@ def print_metrics_summary(
         action_names: List of action names
         title: Title for the summary
     """
-    print(f"\n{'='*60}")
-    print(f"{title:^60}")
-    print(f"{'='*60}")
+    print(f"\n{'='*70}")
+    print(f"{title:^70}")
+    print(f"{'='*70}")
     
-    # Header
-    print(f"{'Action':<20} {'Acc':>8} {'Prec':>8} {'Rec':>8} {'F1':>8}")
-    print(f"{'-'*60}")
+    # Header - standard metrics
+    print(f"{'Action':<15} {'Acc':>8} {'Prec':>8} {'Rec':>8} {'F1':>8} {'OnsetRec':>10}")
+    print(f"{'-'*70}")
     
     # Per-action
     for i, action_name in enumerate(action_names):
@@ -164,16 +304,25 @@ def print_metrics_summary(
         prec = metrics['per_action_precision'][i] if 'per_action_precision' in metrics else 0
         rec = metrics['per_action_recall'][i] if 'per_action_recall' in metrics else 0
         f1 = metrics['per_action_f1_score'][i] if 'per_action_f1_score' in metrics else 0
+        onset_rec = metrics['per_action_onset_recall'][i] if 'per_action_onset_recall' in metrics else 0
         
-        print(f"{action_name:<20} {acc:>8.4f} {prec:>8.4f} {rec:>8.4f} {f1:>8.4f}")
+        print(f"{action_name:<15} {acc:>8.4f} {prec:>8.4f} {rec:>8.4f} {f1:>8.4f} {onset_rec:>10.4f}")
     
     # Mean
-    print(f"{'-'*60}")
+    print(f"{'-'*70}")
     mean_acc = np.mean(metrics['per_action_accuracy']) if 'per_action_accuracy' in metrics else 0
     mean_prec = np.mean(metrics['per_action_precision']) if 'per_action_precision' in metrics else 0
     mean_rec = np.mean(metrics['per_action_recall']) if 'per_action_recall' in metrics else 0
     mean_f1 = np.mean(metrics['per_action_f1_score']) if 'per_action_f1_score' in metrics else 0
+    mean_onset_rec = np.mean(metrics['per_action_onset_recall']) if 'per_action_onset_recall' in metrics else 0
     
-    print(f"{'Mean':<20} {mean_acc:>8.4f} {mean_prec:>8.4f} {mean_rec:>8.4f} {mean_f1:>8.4f}")
-    print(f"{'='*60}\n")
+    print(f"{'Mean':<15} {mean_acc:>8.4f} {mean_prec:>8.4f} {mean_rec:>8.4f} {mean_f1:>8.4f} {mean_onset_rec:>10.4f}")
+    
+    # Onset summary if available
+    if 'onset_accuracy' in metrics:
+        print(f"{'-'*70}")
+        print(f"Onset Frames: {metrics.get('onset_count', 0):,} ({metrics.get('onset_ratio', 0)*100:.1f}% of data)")
+        print(f"Onset Exact Match Accuracy: {metrics.get('onset_accuracy', 0):.4f}")
+    
+    print(f"{'='*70}\n")
 

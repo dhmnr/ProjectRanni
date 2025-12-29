@@ -39,6 +39,7 @@ from common.metrics import (
     compute_accuracy,
     compute_per_action_metrics,
     compute_action_distribution_distance,
+    compute_onset_metrics,
     format_metrics_for_logging,
     print_metrics_summary,
 )
@@ -676,6 +677,7 @@ def evaluate(
     
     all_predictions = []
     all_targets = []
+    all_previous_actions = []  # For onset metrics
     total_loss = 0.0
     batches_processed = 0
     
@@ -697,6 +699,13 @@ def evaluate(
                 # Block until computation is done, then convert
                 all_predictions.append(np.asarray(predictions))
                 all_targets.append(np.asarray(batch['actions']))
+                
+                # Collect previous actions for onset metrics (temporal models have action_history)
+                if is_temporal and 'action_history' in batch:
+                    # Last action in history = previous action
+                    prev_actions = np.asarray(batch['action_history'][:, -1, :])
+                    all_previous_actions.append(prev_actions)
+                
                 total_loss += float(loss)
                 batches_processed += 1
                 progress.update(task, advance=1)
@@ -705,6 +714,11 @@ def evaluate(
             predictions, loss = eval_fn(state, batch)
             all_predictions.append(np.asarray(predictions))
             all_targets.append(np.asarray(batch['actions']))
+            
+            if is_temporal and 'action_history' in batch:
+                prev_actions = np.asarray(batch['action_history'][:, -1, :])
+                all_previous_actions.append(prev_actions)
+            
             total_loss += float(loss)
             batches_processed += 1
     
@@ -718,12 +732,21 @@ def evaluate(
     per_action_metrics = compute_per_action_metrics(all_predictions, all_targets, threshold=0.5)
     dist_metrics = compute_action_distribution_distance(all_predictions, all_targets, threshold=0.5)
     
+    # Compute onset metrics for temporal models
+    onset_metrics = {}
+    if is_temporal and all_previous_actions:
+        all_previous_actions = np.concatenate(all_previous_actions, axis=0)
+        onset_metrics = compute_onset_metrics(
+            all_predictions, all_targets, all_previous_actions, threshold=0.5
+        )
+    
     # Ensure all scalar values are Python floats
     metrics = {
         'loss': float(avg_loss),
         'accuracy': float(accuracy) if hasattr(accuracy, '__float__') else accuracy,
         **per_action_metrics,
         **dist_metrics,
+        **onset_metrics,
     }
     
     return metrics
