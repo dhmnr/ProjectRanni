@@ -43,6 +43,7 @@ from common.metrics import (
     format_metrics_for_logging,
     print_metrics_summary,
 )
+from common.losses import get_loss_fn, focal_loss_with_logits
 
 # Setup logging
 logging.basicConfig(
@@ -264,32 +265,65 @@ def create_learning_rate_schedule(config: Dict) -> optax.Schedule:
     return schedule
 
 
-def binary_cross_entropy_with_logits(
+# Module-level loss configuration - SET BEFORE FIRST JIT COMPILATION
+# These values are captured at JIT trace time
+_USE_FOCAL_LOSS = False
+_FOCAL_GAMMA = 2.0
+_FOCAL_ALPHA = None
+
+
+def compute_loss(
     logits: jnp.ndarray,
     labels: jnp.ndarray,
     weights: Optional[jnp.ndarray] = None,
+    use_focal: bool = False,
+    focal_gamma: float = 2.0,
+    focal_alpha: Optional[float] = None,
 ) -> jnp.ndarray:
-    """Binary cross entropy loss with logits.
+    """Compute loss with configurable loss function.
     
     Args:
         logits: Model outputs [B, num_actions]
         labels: Ground truth [B, num_actions]
         weights: Optional per-action weights [num_actions]
+        use_focal: Whether to use focal loss
+        focal_gamma: Focal loss gamma parameter
+        focal_alpha: Focal loss alpha parameter
         
     Returns:
         Loss value (scalar)
     """
-    # Stable BCE computation
-    log_sigmoid = jax.nn.log_sigmoid(logits)
-    log_one_minus_sigmoid = jax.nn.log_sigmoid(-logits)
-    
-    loss = -(labels * log_sigmoid + (1 - labels) * log_one_minus_sigmoid)
-    
-    # Apply weights if provided
-    if weights is not None:
-        loss = loss * weights[None, :]
-    
-    return jnp.mean(loss)
+    if use_focal:
+        return focal_loss_with_logits(
+            logits, labels, 
+            gamma=focal_gamma, 
+            alpha=focal_alpha,
+            weights=weights if weights is not None else None,
+        )
+    else:
+        # Standard BCE
+        log_sigmoid = jax.nn.log_sigmoid(logits)
+        log_one_minus_sigmoid = jax.nn.log_sigmoid(-logits)
+        
+        loss = -(labels * log_sigmoid + (1 - labels) * log_one_minus_sigmoid)
+        
+        if weights is not None:
+            loss = loss * weights[None, :]
+        
+        return jnp.mean(loss)
+
+
+# Wrapper functions that use module-level config
+# These MUST be created before JIT compilation to capture config values
+def _create_loss_fn(use_focal: bool, focal_gamma: float, focal_alpha: Optional[float]):
+    """Create a loss function with the specified configuration."""
+    def loss_fn(logits, labels, weights=None):
+        return compute_loss(logits, labels, weights, use_focal, focal_gamma, focal_alpha)
+    return loss_fn
+
+
+# Default loss function (standard BCE)
+_current_loss_fn = _create_loss_fn(False, 2.0, None)
 
 
 def compute_accuracy_jax(predictions: jnp.ndarray, targets: jnp.ndarray, threshold: float = 0.5) -> jnp.ndarray:
@@ -337,7 +371,7 @@ def train_step_vision(state: TrainState, batch: Dict, action_weights: jnp.ndarra
             rngs={'dropout': dropout_rng},
         )
         
-        loss = binary_cross_entropy_with_logits(
+        loss = _current_loss_fn(
             logits,
             batch['actions'],
             weights=action_weights,
@@ -390,7 +424,7 @@ def train_step_hybrid(state: TrainState, batch: Dict, action_weights: jnp.ndarra
             rngs={'dropout': dropout_rng},
         )
         
-        loss = binary_cross_entropy_with_logits(
+        loss = _current_loss_fn(
             logits,
             batch['actions'],
             weights=action_weights,
@@ -420,7 +454,7 @@ def eval_step_vision(state: TrainState, batch: Dict):
         variables['batch_stats'] = state.batch_stats
     
     logits = state.apply_fn(variables, batch['frames'], training=False)
-    loss = binary_cross_entropy_with_logits(logits, batch['actions'])
+    loss = _current_loss_fn(logits, batch['actions'])
     predictions = jax.nn.sigmoid(logits)
     
     return predictions, loss
@@ -441,7 +475,7 @@ def eval_step_hybrid(state: TrainState, batch: Dict):
         batch['npc_anim_idx'],
         training=False
     )
-    loss = binary_cross_entropy_with_logits(logits, batch['actions'])
+    loss = _current_loss_fn(logits, batch['actions'])
     predictions = jax.nn.sigmoid(logits)
     
     return predictions, loss
@@ -492,7 +526,7 @@ def train_step_temporal(state: TrainState, batch: Dict, action_weights: jnp.ndar
                 rngs={'dropout': dropout_rng},
             )
         
-        loss = binary_cross_entropy_with_logits(
+        loss = _current_loss_fn(
             logits,
             batch['actions'],
             weights=action_weights,
@@ -536,7 +570,7 @@ def train_step_temporal_with_state(state: TrainState, batch: Dict, action_weight
             rngs={'dropout': dropout_rng},
         )
         
-        loss = binary_cross_entropy_with_logits(
+        loss = _current_loss_fn(
             logits,
             batch['actions'],
             weights=action_weights,
@@ -577,7 +611,7 @@ def train_step_temporal_no_state(state: TrainState, batch: Dict, action_weights:
             rngs={'dropout': dropout_rng},
         )
         
-        loss = binary_cross_entropy_with_logits(
+        loss = _current_loss_fn(
             logits,
             batch['actions'],
             weights=action_weights,
@@ -615,7 +649,7 @@ def eval_step_temporal_with_state(state: TrainState, batch: Dict):
         batch['npc_anim_idx'],
         training=False
     )
-    loss = binary_cross_entropy_with_logits(logits, batch['actions'])
+    loss = _current_loss_fn(logits, batch['actions'])
     predictions = jax.nn.sigmoid(logits)
     
     return predictions, loss
@@ -634,7 +668,7 @@ def eval_step_temporal_no_state(state: TrainState, batch: Dict):
         batch['action_history'],
         training=False
     )
-    loss = binary_cross_entropy_with_logits(logits, batch['actions'])
+    loss = _current_loss_fn(logits, batch['actions'])
     predictions = jax.nn.sigmoid(logits)
     
     return predictions, loss
@@ -986,6 +1020,20 @@ def train(config_path: str):
     # Training loop
     console.print("\n[bold cyan]Starting training...[/bold cyan]")
     best_val_accuracy = 0.0
+    
+    # Configure loss function BEFORE any JIT compilation
+    global _current_loss_fn
+    loss_config = config.get('training', {}).get('loss', {})
+    loss_type = loss_config.get('type', 'bce')
+    
+    if loss_type == 'focal':
+        focal_gamma = loss_config.get('gamma', 2.0)
+        focal_alpha = loss_config.get('alpha', None)
+        _current_loss_fn = _create_loss_fn(use_focal=True, focal_gamma=focal_gamma, focal_alpha=focal_alpha)
+        console.print(f"[cyan]Using Focal Loss (γ={focal_gamma}, α={focal_alpha})[/cyan]")
+    else:
+        _current_loss_fn = _create_loss_fn(use_focal=False, focal_gamma=2.0, focal_alpha=None)
+        console.print("[cyan]Using Binary Cross Entropy Loss[/cyan]")
     
     # Calculate total steps
     batch_size = config['training']['batch_size']

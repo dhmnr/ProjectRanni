@@ -1,0 +1,79 @@
+# Temporal CNN Model with Focal Loss
+# Focuses training on hard examples (action onsets, rare actions)
+
+dataset:
+  path: "./dataset/margit_100_256x144.zarr"
+  train_ratio: 0.8
+  val_ratio: 0.2
+  split_seed: 42
+  normalize_frames: true
+  use_state: true
+  validate_episodes: true
+
+# Temporal context settings
+temporal:
+  num_history_frames: 4   # 4 past frames + current = 5 total
+  num_action_history: 4   # 4 past actions
+  frame_skip: 1           # Every frame
+
+# State preprocessing
+state_preprocessing:
+  normalize_resources: true
+  compute_distances: true
+  anim_embed_dim: 16
+
+model:
+  name: temporal_cnn
+  frame_mode: channel_stack
+  conv_features: [32, 64, 128, 256]
+  action_history_features: 64
+  state_encoder_features: [64, 64]
+  state_output_features: 64
+  dense_features: [512, 256]
+  dropout_rate: 0.3
+  use_batch_norm: true
+
+training:
+  batch_size: 32
+  num_epochs: 100
+  learning_rate: 0.001
+  weight_decay: 0.001
+  lr_schedule:
+    type: cosine
+    warmup_epochs: 5
+    min_lr: 0.00001
+  use_class_weights: true
+  label_smoothing: 0.0
+  grad_clip_norm: 1.0
+  checkpoint_dir: "./checkpoints/temporal_cnn_focal"
+  save_every_n_epochs: 10
+  keep_last_n_checkpoints: 3
+  
+  # Focal Loss Configuration
+  # Focuses on hard examples, down-weights easy ones
+  loss:
+    type: focal           # 'bce' or 'focal'
+    gamma: 2.0            # Focusing parameter (higher = more focus on hard)
+                          # gamma=0 is equivalent to BCE
+                          # gamma=2 is standard, gamma=5 is aggressive
+    alpha: 0.25           # Class balancing for positive class (rare actions)
+                          # alpha=0.25 weights positives 3x more than negatives
+                          # Set to null for no class balancing
+
+evaluation:
+  eval_every_n_epochs: 1
+  metrics_threshold: 0.5
+
+logging:
+  use_wandb: true
+  wandb_project: "ProjectRanni-BC"
+  wandb_entity: "dhmnr-projects"
+  wandb_run_name: "temporal_cnn_focal_g2_a25"
+  log_every_n_steps: 50
+  log_gradients: false
+
+system:
+  seed: 42
+  num_workers: 4
+  pin_memory: false
+
