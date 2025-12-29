@@ -27,7 +27,13 @@ console = Console()
 # Add parent directory to path
 sys.path.append(str(Path(__file__).parent))
 
-from common.dataset import ZarrGameplayDataset, create_data_loader, split_episodes
+from common.dataset import (
+    ZarrGameplayDataset, 
+    create_data_loader, 
+    split_episodes,
+    TemporalGameplayDataset,
+    create_temporal_data_loader,
+)
 from common.state_preprocessing import create_preprocessor
 from common.metrics import (
     compute_accuracy,
@@ -112,6 +118,8 @@ def create_train_state(
     rng,
     state_shape: tuple = None,
     use_anim_embeddings: bool = False,
+    is_temporal: bool = False,
+    action_history_shape: tuple = None,
 ) -> TrainState:
     """Initialize model and create train state.
     
@@ -123,6 +131,8 @@ def create_train_state(
         rng: JAX random key
         state_shape: Optional state input shape for hybrid models
         use_anim_embeddings: Whether model uses animation embeddings
+        is_temporal: Whether this is a temporal model
+        action_history_shape: Shape for action history (temporal models)
         
     Returns:
         TrainState with initialized parameters
@@ -132,7 +142,28 @@ def create_train_state(
     
     batch_size = input_shape[0]
     
-    if state_shape is not None:
+    if is_temporal:
+        # Temporal model initialization
+        if state_shape is not None and use_anim_embeddings:
+            # Temporal with state + embeddings
+            variables = model.init(
+                {'params': init_rng, 'dropout': dropout_rng},
+                jnp.ones(input_shape),                      # frames [B, T, C, H, W]
+                jnp.ones(action_history_shape),             # action_history [B, K, A]
+                jnp.ones(state_shape),                      # continuous state
+                jnp.zeros((batch_size,), dtype=jnp.int32),  # hero_anim_idx
+                jnp.zeros((batch_size,), dtype=jnp.int32),  # npc_anim_idx
+                training=False,
+            )
+        else:
+            # Temporal without state
+            variables = model.init(
+                {'params': init_rng, 'dropout': dropout_rng},
+                jnp.ones(input_shape),                      # frames [B, T, C, H, W]
+                jnp.ones(action_history_shape),             # action_history [B, K, A]
+                training=False,
+            )
+    elif state_shape is not None:
         if use_anim_embeddings:
             # Hybrid model with state + animation embeddings
             variables = model.init(
@@ -415,7 +446,207 @@ def eval_step_hybrid(state: TrainState, batch: Dict):
     return predictions, loss
 
 
-def evaluate(state: TrainState, dataset: ZarrGameplayDataset, config: Dict, show_progress: bool = True, use_state: bool = False) -> Dict:
+@jax.jit
+def train_step_temporal(state: TrainState, batch: Dict, action_weights: jnp.ndarray, rng):
+    """Single training step for temporal models (frame stacking + action history).
+    
+    Args:
+        state: TrainState
+        batch: Batch of data (frames [B,T,C,H,W], action_history, state, actions)
+        action_weights: Per-action loss weights
+        rng: JAX random key
+        
+    Returns:
+        (new_state, metrics)
+    """
+    dropout_rng = jax.random.fold_in(rng, state.step)
+    
+    def loss_fn(params):
+        variables = {'params': params}
+        if state.batch_stats is not None:
+            variables['batch_stats'] = state.batch_stats
+        
+        # Check if we have state features
+        has_state = 'state' in batch and batch['state'] is not None
+        
+        if has_state:
+            logits, new_variables = state.apply_fn(
+                variables,
+                batch['frames'],
+                batch['action_history'],
+                batch['state'],
+                batch['hero_anim_idx'],
+                batch['npc_anim_idx'],
+                training=True,
+                mutable=['batch_stats'] if state.batch_stats is not None else False,
+                rngs={'dropout': dropout_rng},
+            )
+        else:
+            logits, new_variables = state.apply_fn(
+                variables,
+                batch['frames'],
+                batch['action_history'],
+                training=True,
+                mutable=['batch_stats'] if state.batch_stats is not None else False,
+                rngs={'dropout': dropout_rng},
+            )
+        
+        loss = binary_cross_entropy_with_logits(
+            logits,
+            batch['actions'],
+            weights=action_weights,
+        )
+        
+        new_batch_stats = new_variables.get('batch_stats', None)
+        return loss, (logits, new_batch_stats)
+    
+    grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
+    (loss, (logits, new_batch_stats)), grads = grad_fn(state.params)
+    
+    state = state.apply_gradients(grads=grads)
+    if new_batch_stats is not None:
+        state = state.replace(batch_stats=new_batch_stats)
+    
+    predictions = jax.nn.sigmoid(logits)
+    accuracy = compute_accuracy_jax(predictions, batch['actions'])
+    
+    return state, {'loss': loss, 'accuracy': accuracy}
+
+
+@jax.jit
+def train_step_temporal_with_state(state: TrainState, batch: Dict, action_weights: jnp.ndarray, rng):
+    """Training step for temporal models with state features."""
+    dropout_rng = jax.random.fold_in(rng, state.step)
+    
+    def loss_fn(params):
+        variables = {'params': params}
+        if state.batch_stats is not None:
+            variables['batch_stats'] = state.batch_stats
+        
+        logits, new_variables = state.apply_fn(
+            variables,
+            batch['frames'],
+            batch['action_history'],
+            batch['state'],
+            batch['hero_anim_idx'],
+            batch['npc_anim_idx'],
+            training=True,
+            mutable=['batch_stats'] if state.batch_stats is not None else False,
+            rngs={'dropout': dropout_rng},
+        )
+        
+        loss = binary_cross_entropy_with_logits(
+            logits,
+            batch['actions'],
+            weights=action_weights,
+        )
+        
+        new_batch_stats = new_variables.get('batch_stats', None)
+        return loss, (logits, new_batch_stats)
+    
+    grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
+    (loss, (logits, new_batch_stats)), grads = grad_fn(state.params)
+    
+    state = state.apply_gradients(grads=grads)
+    if new_batch_stats is not None:
+        state = state.replace(batch_stats=new_batch_stats)
+    
+    predictions = jax.nn.sigmoid(logits)
+    accuracy = compute_accuracy_jax(predictions, batch['actions'])
+    
+    return state, {'loss': loss, 'accuracy': accuracy}
+
+
+@jax.jit
+def train_step_temporal_no_state(state: TrainState, batch: Dict, action_weights: jnp.ndarray, rng):
+    """Training step for temporal models without state features."""
+    dropout_rng = jax.random.fold_in(rng, state.step)
+    
+    def loss_fn(params):
+        variables = {'params': params}
+        if state.batch_stats is not None:
+            variables['batch_stats'] = state.batch_stats
+        
+        logits, new_variables = state.apply_fn(
+            variables,
+            batch['frames'],
+            batch['action_history'],
+            training=True,
+            mutable=['batch_stats'] if state.batch_stats is not None else False,
+            rngs={'dropout': dropout_rng},
+        )
+        
+        loss = binary_cross_entropy_with_logits(
+            logits,
+            batch['actions'],
+            weights=action_weights,
+        )
+        
+        new_batch_stats = new_variables.get('batch_stats', None)
+        return loss, (logits, new_batch_stats)
+    
+    grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
+    (loss, (logits, new_batch_stats)), grads = grad_fn(state.params)
+    
+    state = state.apply_gradients(grads=grads)
+    if new_batch_stats is not None:
+        state = state.replace(batch_stats=new_batch_stats)
+    
+    predictions = jax.nn.sigmoid(logits)
+    accuracy = compute_accuracy_jax(predictions, batch['actions'])
+    
+    return state, {'loss': loss, 'accuracy': accuracy}
+
+
+@jax.jit
+def eval_step_temporal_with_state(state: TrainState, batch: Dict):
+    """Eval step for temporal models with state features."""
+    variables = {'params': state.params}
+    if state.batch_stats is not None:
+        variables['batch_stats'] = state.batch_stats
+    
+    logits = state.apply_fn(
+        variables,
+        batch['frames'],
+        batch['action_history'],
+        batch['state'],
+        batch['hero_anim_idx'],
+        batch['npc_anim_idx'],
+        training=False
+    )
+    loss = binary_cross_entropy_with_logits(logits, batch['actions'])
+    predictions = jax.nn.sigmoid(logits)
+    
+    return predictions, loss
+
+
+@jax.jit
+def eval_step_temporal_no_state(state: TrainState, batch: Dict):
+    """Eval step for temporal models without state features."""
+    variables = {'params': state.params}
+    if state.batch_stats is not None:
+        variables['batch_stats'] = state.batch_stats
+    
+    logits = state.apply_fn(
+        variables,
+        batch['frames'],
+        batch['action_history'],
+        training=False
+    )
+    loss = binary_cross_entropy_with_logits(logits, batch['actions'])
+    predictions = jax.nn.sigmoid(logits)
+    
+    return predictions, loss
+
+
+def evaluate(
+    state: TrainState, 
+    dataset, 
+    config: Dict, 
+    show_progress: bool = True, 
+    use_state: bool = False,
+    is_temporal: bool = False,
+) -> Dict:
     """Evaluate model on dataset with JIT-compiled steps and progress bar.
     
     Args:
@@ -424,14 +655,20 @@ def evaluate(state: TrainState, dataset: ZarrGameplayDataset, config: Dict, show
         config: Config dict
         show_progress: Whether to show progress bar
         use_state: Whether model uses state features
+        is_temporal: Whether this is a temporal model
         
     Returns:
         Dict of evaluation metrics
     """
     batch_size = config['training']['batch_size']
     
-    # Select appropriate eval function
-    eval_fn = eval_step_hybrid if use_state else eval_step_vision
+    # Select appropriate eval function and data loader
+    if is_temporal:
+        eval_fn = eval_step_temporal_with_state if use_state else eval_step_temporal_no_state
+        data_loader_fn = create_temporal_data_loader
+    else:
+        eval_fn = eval_step_hybrid if use_state else eval_step_vision
+        data_loader_fn = create_data_loader
     
     # Pre-compute number of batches for progress bar
     total_samples = len(dataset)
@@ -454,7 +691,7 @@ def evaluate(state: TrainState, dataset: ZarrGameplayDataset, config: Dict, show
         ) as progress:
             task = progress.add_task("Eval", total=num_batches)
             
-            for batch in create_data_loader(dataset, batch_size, shuffle=False, drop_last=False):
+            for batch in data_loader_fn(dataset, batch_size, shuffle=False, drop_last=False):
                 predictions, loss = eval_fn(state, batch)
                 
                 # Block until computation is done, then convert
@@ -464,7 +701,7 @@ def evaluate(state: TrainState, dataset: ZarrGameplayDataset, config: Dict, show
                 batches_processed += 1
                 progress.update(task, advance=1)
     else:
-        for batch in create_data_loader(dataset, batch_size, shuffle=False, drop_last=False):
+        for batch in data_loader_fn(dataset, batch_size, shuffle=False, drop_last=False):
             predictions, loss = eval_fn(state, batch)
             all_predictions.append(np.asarray(predictions))
             all_targets.append(np.asarray(batch['actions']))
@@ -543,23 +780,59 @@ def train(config_path: str):
     # Create state preprocessor (used by all models with state)
     state_preprocessor = create_preprocessor(config)
     
-    train_dataset = ZarrGameplayDataset(
-        dataset_path=dataset_path,
-        episode_indices=train_indices,
-        use_state=config['dataset']['use_state'],
-        normalize_frames=config['dataset']['normalize_frames'],
-        validate_episodes=config['dataset'].get('validate_episodes', True),
-        state_preprocessor=state_preprocessor,
-    )
+    # Check if this is a temporal model
+    model_name = config['model']['name']
+    is_temporal = model_name == 'temporal_cnn'
     
-    val_dataset = ZarrGameplayDataset(
-        dataset_path=dataset_path,
-        episode_indices=val_indices,
-        use_state=config['dataset']['use_state'],
-        normalize_frames=config['dataset']['normalize_frames'],
-        validate_episodes=config['dataset'].get('validate_episodes', True),
-        state_preprocessor=state_preprocessor,
-    )
+    if is_temporal:
+        # Temporal dataset with frame stacking and action history
+        temporal_config = config.get('temporal', {})
+        num_history_frames = temporal_config.get('num_history_frames', 4)
+        num_action_history = temporal_config.get('num_action_history', 4)
+        frame_skip = temporal_config.get('frame_skip', 1)
+        
+        train_dataset = TemporalGameplayDataset(
+            dataset_path=dataset_path,
+            episode_indices=train_indices,
+            use_state=config['dataset']['use_state'],
+            normalize_frames=config['dataset']['normalize_frames'],
+            validate_episodes=config['dataset'].get('validate_episodes', True),
+            state_preprocessor=state_preprocessor,
+            num_history_frames=num_history_frames,
+            num_action_history=num_action_history,
+            frame_skip=frame_skip,
+        )
+        
+        val_dataset = TemporalGameplayDataset(
+            dataset_path=dataset_path,
+            episode_indices=val_indices,
+            use_state=config['dataset']['use_state'],
+            normalize_frames=config['dataset']['normalize_frames'],
+            validate_episodes=config['dataset'].get('validate_episodes', True),
+            state_preprocessor=state_preprocessor,
+            num_history_frames=num_history_frames,
+            num_action_history=num_action_history,
+            frame_skip=frame_skip,
+        )
+    else:
+        # Standard single-frame dataset
+        train_dataset = ZarrGameplayDataset(
+            dataset_path=dataset_path,
+            episode_indices=train_indices,
+            use_state=config['dataset']['use_state'],
+            normalize_frames=config['dataset']['normalize_frames'],
+            validate_episodes=config['dataset'].get('validate_episodes', True),
+            state_preprocessor=state_preprocessor,
+        )
+        
+        val_dataset = ZarrGameplayDataset(
+            dataset_path=dataset_path,
+            episode_indices=val_indices,
+            use_state=config['dataset']['use_state'],
+            normalize_frames=config['dataset']['normalize_frames'],
+            validate_episodes=config['dataset'].get('validate_episodes', True),
+            state_preprocessor=state_preprocessor,
+        )
     
     # Get action names
     action_names = train_dataset.action_keys
@@ -611,6 +884,42 @@ def train(config_path: str):
             dropout_rate=config['model']['dropout_rate'],
             use_batch_norm=config['model']['use_batch_norm'],
         )
+    elif model_name == 'temporal_cnn':
+        from models.temporal_cnn import create_model
+        
+        # Get temporal config
+        temporal_config = config.get('temporal', {})
+        num_history_frames = temporal_config.get('num_history_frames', 4)
+        num_action_history = temporal_config.get('num_action_history', 4)
+        
+        # State features (optional)
+        num_state_features = state_preprocessor.continuous_dim if use_state else 10
+        anim_embed_dim = config.get('state_preprocessing', {}).get('anim_embed_dim', 16)
+        
+        console.print(f"[cyan]Temporal config: {num_history_frames} history frames, {num_action_history} action history[/cyan]")
+        if use_state:
+            console.print(f"[cyan]Continuous state features: {num_state_features}[/cyan]")
+            console.print(f"[cyan]Hero anim vocab size: {state_preprocessor.hero_vocab_size}[/cyan]")
+            console.print(f"[cyan]NPC anim vocab size: {state_preprocessor.npc_vocab_size}[/cyan]")
+        
+        model = create_model(
+            num_actions=num_actions,
+            num_history_frames=num_history_frames,
+            num_action_history=num_action_history,
+            use_state=use_state,
+            num_state_features=num_state_features,
+            hero_anim_vocab_size=state_preprocessor.hero_vocab_size if use_state else 67,
+            npc_anim_vocab_size=state_preprocessor.npc_vocab_size if use_state else 54,
+            anim_embed_dim=anim_embed_dim,
+            frame_mode=config['model'].get('frame_mode', 'channel_stack'),
+            conv_features=tuple(config['model']['conv_features']),
+            dense_features=tuple(config['model']['dense_features']),
+            state_encoder_features=tuple(config['model'].get('state_encoder_features', [64, 64])),
+            state_output_features=config['model'].get('state_output_features', 64),
+            action_history_features=config['model'].get('action_history_features', 64),
+            dropout_rate=config['model']['dropout_rate'],
+            use_batch_norm=config['model']['use_batch_norm'],
+        )
     else:
         raise ValueError(f"Unknown model: {model_name}")
     
@@ -625,12 +934,18 @@ def train(config_path: str):
         state_shape = (config['training']['batch_size'],) + sample['state'].shape
         console.print(f"[cyan]State shape: {state_shape}[/cyan]")
     
+    # Get action history shape for temporal models
+    action_history_shape = None
+    if is_temporal and 'action_history' in sample:
+        action_history_shape = (config['training']['batch_size'],) + sample['action_history'].shape
+        console.print(f"[cyan]Action history shape: {action_history_shape}[/cyan]")
+    
     # Create train state
     console.print("[cyan]Initializing model parameters (this may take a moment)...[/cyan]")
     rng, init_rng = jax.random.split(rng)
     
     # Hybrid state models use animation embeddings
-    use_anim_embeddings = (model_name == 'hybrid_state')
+    use_anim_embeddings = (model_name == 'hybrid_state') or (model_name == 'temporal_cnn' and use_state)
     
     state = create_train_state(
         model=model,
@@ -640,6 +955,8 @@ def train(config_path: str):
         rng=init_rng,
         state_shape=state_shape,
         use_anim_embeddings=use_anim_embeddings,
+        is_temporal=is_temporal,
+        action_history_shape=action_history_shape,
     )
     console.print("[green]✓ Model initialized and ready![/green]")
     
@@ -651,8 +968,13 @@ def train(config_path: str):
     batch_size = config['training']['batch_size']
     steps_per_epoch = len(train_dataset) // batch_size
     
-    # Select appropriate step functions based on model type
-    train_fn = train_step_hybrid if use_state else train_step_vision
+    # Select appropriate step functions and data loader based on model type
+    if is_temporal:
+        train_fn = train_step_temporal_with_state if use_state else train_step_temporal_no_state
+        data_loader_fn = create_temporal_data_loader
+    else:
+        train_fn = train_step_hybrid if use_state else train_step_vision
+        data_loader_fn = create_data_loader
     
     with Progress(
         SpinnerColumn(),
@@ -685,7 +1007,7 @@ def train(config_path: str):
             # Training
             train_metrics = []
             
-            for step, batch in enumerate(create_data_loader(train_dataset, batch_size, shuffle=True)):
+            for step, batch in enumerate(data_loader_fn(train_dataset, batch_size, shuffle=True)):
                 rng, step_rng = jax.random.split(rng)
                 state, metrics = train_fn(state, batch, action_weights, step_rng)
                 train_metrics.append(metrics)
@@ -716,7 +1038,7 @@ def train(config_path: str):
                 progress.stop()  # Pause progress bar for evaluation output
                 
                 console.print(f"\n[bold yellow]Evaluating at epoch {epoch + 1}...[/bold yellow]")
-                val_metrics = evaluate(state, val_dataset, config, use_state=use_state)
+                val_metrics = evaluate(state, val_dataset, config, use_state=use_state, is_temporal=is_temporal)
                 
                 # Create summary table
                 table = Table(title=f"Epoch {epoch + 1}/{config['training']['num_epochs']} Summary", show_header=True, header_style="bold magenta")
