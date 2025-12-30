@@ -190,8 +190,7 @@ def compute_buffered_onset_metrics(
 ) -> Dict[str, float]:
     """Compute onset metrics with temporal buffer (±k frames tolerance).
     
-    Instead of requiring exact frame matching, allows predictions within
-    a buffer window to count as correct. More realistic for gameplay.
+    Correctly matches onset DIRECTION: 0→1 must match with 0→1, not 1→0.
     
     Args:
         predictions: Predicted probabilities [N, num_actions]
@@ -211,94 +210,103 @@ def compute_buffered_onset_metrics(
     
     num_samples, num_actions = targets.shape
     
-    # Find TRUE onset frames (where target action changed)
-    true_onset_mask = ~np.all(targets == previous_actions, axis=1)  # [N]
-    true_onset_indices = np.where(true_onset_mask)[0]
+    # Per-action buffered metrics with DIRECTION matching
+    per_action_buffered_recall = np.zeros(num_actions)
+    per_action_buffered_precision = np.zeros(num_actions)
+    per_action_true_starts = np.zeros(num_actions, dtype=int)  # 0→1 counts
+    per_action_pred_starts = np.zeros(num_actions, dtype=int)
     
-    # Find PREDICTED onset frames (where prediction changed)
-    pred_onset_mask = ~np.all(pred_binary == prev_pred_binary, axis=1)  # [N]
-    pred_onset_indices = np.where(pred_onset_mask)[0]
+    total_true_onsets = 0
+    total_pred_onsets = 0
+    total_matched_recall = 0
+    total_matched_precision = 0
     
-    num_true_onsets = len(true_onset_indices)
-    num_pred_onsets = len(pred_onset_indices)
+    for action_idx in range(num_actions):
+        # TRUE action STARTS (0→1) for this action
+        true_starts = (previous_actions[:, action_idx] == 0) & (targets[:, action_idx] == 1)
+        true_start_indices = np.where(true_starts)[0]
+        
+        # TRUE action ENDS (1→0) for this action
+        true_ends = (previous_actions[:, action_idx] == 1) & (targets[:, action_idx] == 0)
+        true_end_indices = np.where(true_ends)[0]
+        
+        # PREDICTED action STARTS (0→1) for this action
+        pred_starts = (prev_pred_binary[:, action_idx] == 0) & (pred_binary[:, action_idx] == 1)
+        pred_start_indices = np.where(pred_starts)[0]
+        
+        # PREDICTED action ENDS (1→0) for this action
+        pred_ends = (prev_pred_binary[:, action_idx] == 1) & (pred_binary[:, action_idx] == 0)
+        pred_end_indices = np.where(pred_ends)[0]
+        
+        # Count starts (most important for action initiation)
+        per_action_true_starts[action_idx] = len(true_start_indices)
+        per_action_pred_starts[action_idx] = len(pred_start_indices)
+        
+        # Match STARTS: true 0→1 with predicted 0→1
+        matched_starts_recall = 0
+        for true_idx in true_start_indices:
+            if len(pred_start_indices) > 0:
+                if np.min(np.abs(pred_start_indices - true_idx)) <= buffer_frames:
+                    matched_starts_recall += 1
+        
+        matched_starts_precision = 0
+        for pred_idx in pred_start_indices:
+            if len(true_start_indices) > 0:
+                if np.min(np.abs(true_start_indices - pred_idx)) <= buffer_frames:
+                    matched_starts_precision += 1
+        
+        # Match ENDS: true 1→0 with predicted 1→0
+        matched_ends_recall = 0
+        for true_idx in true_end_indices:
+            if len(pred_end_indices) > 0:
+                if np.min(np.abs(pred_end_indices - true_idx)) <= buffer_frames:
+                    matched_ends_recall += 1
+        
+        matched_ends_precision = 0
+        for pred_idx in pred_end_indices:
+            if len(true_end_indices) > 0:
+                if np.min(np.abs(true_end_indices - pred_idx)) <= buffer_frames:
+                    matched_ends_precision += 1
+        
+        # Combine starts and ends for this action
+        num_true_changes = len(true_start_indices) + len(true_end_indices)
+        num_pred_changes = len(pred_start_indices) + len(pred_end_indices)
+        matched_recall = matched_starts_recall + matched_ends_recall
+        matched_precision = matched_starts_precision + matched_ends_precision
+        
+        if num_true_changes > 0:
+            per_action_buffered_recall[action_idx] = matched_recall / num_true_changes
+        if num_pred_changes > 0:
+            per_action_buffered_precision[action_idx] = matched_precision / num_pred_changes
+        
+        # Accumulate totals
+        total_true_onsets += num_true_changes
+        total_pred_onsets += num_pred_changes
+        total_matched_recall += matched_recall
+        total_matched_precision += matched_precision
     
-    if num_true_onsets == 0:
-        return {
-            'buffered_onset_recall': 0.0,
-            'buffered_onset_precision': 0.0,
-            'buffered_onset_f1': 0.0,
-            'num_true_onsets': 0,
-            'num_pred_onsets': num_pred_onsets,
-            'buffer_frames': buffer_frames,
-            'per_action_buffered_recall': np.zeros(num_actions),
-            'per_action_buffered_precision': np.zeros(num_actions),
-        }
-    
-    # Buffered Recall: For each TRUE onset, is there a PRED onset within ±k frames?
-    matched_true_onsets = 0
-    for true_idx in true_onset_indices:
-        # Check if any prediction onset is within buffer
-        if len(pred_onset_indices) > 0:
-            distances = np.abs(pred_onset_indices - true_idx)
-            if np.min(distances) <= buffer_frames:
-                matched_true_onsets += 1
-    
-    buffered_recall = matched_true_onsets / num_true_onsets
-    
-    # Buffered Precision: For each PRED onset, is there a TRUE onset within ±k frames?
-    if num_pred_onsets == 0:
-        buffered_precision = 0.0
+    # Overall metrics
+    if total_true_onsets > 0:
+        buffered_recall = total_matched_recall / total_true_onsets
     else:
-        matched_pred_onsets = 0
-        for pred_idx in pred_onset_indices:
-            distances = np.abs(true_onset_indices - pred_idx)
-            if np.min(distances) <= buffer_frames:
-                matched_pred_onsets += 1
-        buffered_precision = matched_pred_onsets / num_pred_onsets
+        buffered_recall = 0.0
     
-    # F1 score
+    if total_pred_onsets > 0:
+        buffered_precision = total_matched_precision / total_pred_onsets
+    else:
+        buffered_precision = 0.0
+    
     if buffered_precision + buffered_recall > 0:
         buffered_f1 = 2 * buffered_precision * buffered_recall / (buffered_precision + buffered_recall)
     else:
         buffered_f1 = 0.0
     
-    # Per-action buffered metrics
-    per_action_buffered_recall = np.zeros(num_actions)
-    per_action_buffered_precision = np.zeros(num_actions)
-    
-    for action_idx in range(num_actions):
-        # True onsets for this action
-        action_true_onset = (targets[:, action_idx] != previous_actions[:, action_idx])
-        action_true_indices = np.where(action_true_onset)[0]
-        
-        # Predicted onsets for this action
-        action_pred_onset = (pred_binary[:, action_idx] != prev_pred_binary[:, action_idx])
-        action_pred_indices = np.where(action_pred_onset)[0]
-        
-        # Recall for this action
-        if len(action_true_indices) > 0:
-            matched = 0
-            for true_idx in action_true_indices:
-                if len(action_pred_indices) > 0:
-                    if np.min(np.abs(action_pred_indices - true_idx)) <= buffer_frames:
-                        matched += 1
-            per_action_buffered_recall[action_idx] = matched / len(action_true_indices)
-        
-        # Precision for this action
-        if len(action_pred_indices) > 0:
-            matched = 0
-            for pred_idx in action_pred_indices:
-                if len(action_true_indices) > 0:
-                    if np.min(np.abs(action_true_indices - pred_idx)) <= buffer_frames:
-                        matched += 1
-            per_action_buffered_precision[action_idx] = matched / len(action_pred_indices)
-    
     return {
         'buffered_onset_recall': float(buffered_recall),
         'buffered_onset_precision': float(buffered_precision),
         'buffered_onset_f1': float(buffered_f1),
-        'num_true_onsets': int(num_true_onsets),
-        'num_pred_onsets': int(num_pred_onsets),
+        'num_true_onsets': int(total_true_onsets),
+        'num_pred_onsets': int(total_pred_onsets),
         'buffer_frames': int(buffer_frames),
         'per_action_buffered_recall': per_action_buffered_recall,
         'per_action_buffered_precision': per_action_buffered_precision,
