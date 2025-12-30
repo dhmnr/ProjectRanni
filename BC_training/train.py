@@ -855,7 +855,7 @@ def train(config_path: str):
     
     # Check if this is a temporal model
     model_name = config['model']['name']
-    is_temporal = model_name == 'temporal_cnn'
+    is_temporal = model_name in ['temporal_cnn', 'gru']
     
     if is_temporal:
         # Temporal dataset with frame stacking and action history
@@ -993,6 +993,48 @@ def train(config_path: str):
             dropout_rate=config['model']['dropout_rate'],
             use_batch_norm=config['model']['use_batch_norm'],
         )
+    elif model_name == 'gru':
+        from models.gru import create_model
+        
+        # Get temporal config
+        temporal_config = config.get('temporal', {})
+        num_history_frames = temporal_config.get('num_history_frames', 4)
+        num_action_history = temporal_config.get('num_action_history', 4)
+        
+        # GRU specific config
+        gru_hidden_size = config['model'].get('gru_hidden_size', 256)
+        gru_num_layers = config['model'].get('gru_num_layers', 1)
+        
+        # State features (optional)
+        num_state_features = state_preprocessor.continuous_dim if use_state else 10
+        anim_embed_dim = config.get('state_preprocessing', {}).get('anim_embed_dim', 16)
+        
+        console.print(f"[cyan]GRU config: hidden_size={gru_hidden_size}, layers={gru_num_layers}[/cyan]")
+        console.print(f"[cyan]Temporal config: {num_history_frames} history frames, {num_action_history} action history[/cyan]")
+        if use_state:
+            console.print(f"[cyan]Continuous state features: {num_state_features}[/cyan]")
+            console.print(f"[cyan]Hero anim vocab size: {state_preprocessor.hero_vocab_size}[/cyan]")
+            console.print(f"[cyan]NPC anim vocab size: {state_preprocessor.npc_vocab_size}[/cyan]")
+        
+        model = create_model(
+            num_actions=num_actions,
+            num_history_frames=num_history_frames,
+            num_action_history=num_action_history,
+            gru_hidden_size=gru_hidden_size,
+            gru_num_layers=gru_num_layers,
+            use_state=use_state,
+            num_state_features=num_state_features,
+            hero_anim_vocab_size=state_preprocessor.hero_vocab_size if use_state else 67,
+            npc_anim_vocab_size=state_preprocessor.npc_vocab_size if use_state else 54,
+            anim_embed_dim=anim_embed_dim,
+            conv_features=tuple(config['model']['conv_features']),
+            dense_features=tuple(config['model']['dense_features']),
+            state_encoder_features=tuple(config['model'].get('state_encoder_features', [64, 64])),
+            state_output_features=config['model'].get('state_output_features', 64),
+            action_history_features=config['model'].get('action_history_features', 64),
+            dropout_rate=config['model']['dropout_rate'],
+            use_batch_norm=config['model']['use_batch_norm'],
+        )
     else:
         raise ValueError(f"Unknown model: {model_name}")
     
@@ -1018,7 +1060,7 @@ def train(config_path: str):
     rng, init_rng = jax.random.split(rng)
     
     # Hybrid state models use animation embeddings
-    use_anim_embeddings = (model_name == 'hybrid_state') or (model_name == 'temporal_cnn' and use_state)
+    use_anim_embeddings = (model_name == 'hybrid_state') or (model_name in ['temporal_cnn', 'gru'] and use_state)
     
     state = create_train_state(
         model=model,
