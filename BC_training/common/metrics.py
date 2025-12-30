@@ -180,6 +180,131 @@ def compute_onset_metrics(
     }
 
 
+def compute_buffered_onset_metrics(
+    predictions: np.ndarray,
+    targets: np.ndarray,
+    previous_actions: np.ndarray,
+    previous_predictions: np.ndarray,
+    threshold: float = 0.5,
+    buffer_frames: int = 5,
+) -> Dict[str, float]:
+    """Compute onset metrics with temporal buffer (±k frames tolerance).
+    
+    Instead of requiring exact frame matching, allows predictions within
+    a buffer window to count as correct. More realistic for gameplay.
+    
+    Args:
+        predictions: Predicted probabilities [N, num_actions]
+        targets: Ground truth binary labels [N, num_actions]
+        previous_actions: Target actions from previous frame [N, num_actions]
+        previous_predictions: Predictions from previous frame [N, num_actions]
+        threshold: Threshold for binary classification
+        buffer_frames: Tolerance window (±k frames)
+        
+    Returns:
+        Dict with buffered onset metrics
+    """
+    pred_binary = (predictions > threshold).astype(np.float32)
+    prev_pred_binary = (previous_predictions > threshold).astype(np.float32)
+    targets = targets.astype(np.float32)
+    previous_actions = previous_actions.astype(np.float32)
+    
+    num_samples, num_actions = targets.shape
+    
+    # Find TRUE onset frames (where target action changed)
+    true_onset_mask = ~np.all(targets == previous_actions, axis=1)  # [N]
+    true_onset_indices = np.where(true_onset_mask)[0]
+    
+    # Find PREDICTED onset frames (where prediction changed)
+    pred_onset_mask = ~np.all(pred_binary == prev_pred_binary, axis=1)  # [N]
+    pred_onset_indices = np.where(pred_onset_mask)[0]
+    
+    num_true_onsets = len(true_onset_indices)
+    num_pred_onsets = len(pred_onset_indices)
+    
+    if num_true_onsets == 0:
+        return {
+            'buffered_onset_recall': 0.0,
+            'buffered_onset_precision': 0.0,
+            'buffered_onset_f1': 0.0,
+            'num_true_onsets': 0,
+            'num_pred_onsets': num_pred_onsets,
+            'buffer_frames': buffer_frames,
+            'per_action_buffered_recall': np.zeros(num_actions),
+            'per_action_buffered_precision': np.zeros(num_actions),
+        }
+    
+    # Buffered Recall: For each TRUE onset, is there a PRED onset within ±k frames?
+    matched_true_onsets = 0
+    for true_idx in true_onset_indices:
+        # Check if any prediction onset is within buffer
+        if len(pred_onset_indices) > 0:
+            distances = np.abs(pred_onset_indices - true_idx)
+            if np.min(distances) <= buffer_frames:
+                matched_true_onsets += 1
+    
+    buffered_recall = matched_true_onsets / num_true_onsets
+    
+    # Buffered Precision: For each PRED onset, is there a TRUE onset within ±k frames?
+    if num_pred_onsets == 0:
+        buffered_precision = 0.0
+    else:
+        matched_pred_onsets = 0
+        for pred_idx in pred_onset_indices:
+            distances = np.abs(true_onset_indices - pred_idx)
+            if np.min(distances) <= buffer_frames:
+                matched_pred_onsets += 1
+        buffered_precision = matched_pred_onsets / num_pred_onsets
+    
+    # F1 score
+    if buffered_precision + buffered_recall > 0:
+        buffered_f1 = 2 * buffered_precision * buffered_recall / (buffered_precision + buffered_recall)
+    else:
+        buffered_f1 = 0.0
+    
+    # Per-action buffered metrics
+    per_action_buffered_recall = np.zeros(num_actions)
+    per_action_buffered_precision = np.zeros(num_actions)
+    
+    for action_idx in range(num_actions):
+        # True onsets for this action
+        action_true_onset = (targets[:, action_idx] != previous_actions[:, action_idx])
+        action_true_indices = np.where(action_true_onset)[0]
+        
+        # Predicted onsets for this action
+        action_pred_onset = (pred_binary[:, action_idx] != prev_pred_binary[:, action_idx])
+        action_pred_indices = np.where(action_pred_onset)[0]
+        
+        # Recall for this action
+        if len(action_true_indices) > 0:
+            matched = 0
+            for true_idx in action_true_indices:
+                if len(action_pred_indices) > 0:
+                    if np.min(np.abs(action_pred_indices - true_idx)) <= buffer_frames:
+                        matched += 1
+            per_action_buffered_recall[action_idx] = matched / len(action_true_indices)
+        
+        # Precision for this action
+        if len(action_pred_indices) > 0:
+            matched = 0
+            for pred_idx in action_pred_indices:
+                if len(action_true_indices) > 0:
+                    if np.min(np.abs(action_true_indices - pred_idx)) <= buffer_frames:
+                        matched += 1
+            per_action_buffered_precision[action_idx] = matched / len(action_pred_indices)
+    
+    return {
+        'buffered_onset_recall': float(buffered_recall),
+        'buffered_onset_precision': float(buffered_precision),
+        'buffered_onset_f1': float(buffered_f1),
+        'num_true_onsets': int(num_true_onsets),
+        'num_pred_onsets': int(num_pred_onsets),
+        'buffer_frames': int(buffer_frames),
+        'per_action_buffered_recall': per_action_buffered_recall,
+        'per_action_buffered_precision': per_action_buffered_precision,
+    }
+
+
 def compute_aggregate_metrics(per_action_metrics: Dict[str, np.ndarray]) -> Dict[str, float]:
     """Compute aggregate (mean) metrics from per-action metrics.
     
@@ -229,7 +354,7 @@ def format_metrics_for_logging(
     scalar_metrics = {}
     
     for metric_name, values in metrics.items():
-        if 'onset' in metric_name:
+        if 'buffered' in metric_name or 'onset' in metric_name:
             onset_metrics[metric_name] = values
         elif metric_name in ['l1_distance', 'l2_distance', 'kl_divergence', 'pred_freq', 'target_freq']:
             distribution_metrics[metric_name] = values
@@ -323,6 +448,24 @@ def print_metrics_summary(
         print(f"{'-'*70}")
         print(f"Onset Frames: {metrics.get('onset_count', 0):,} ({metrics.get('onset_ratio', 0)*100:.1f}% of data)")
         print(f"Onset Exact Match Accuracy: {metrics.get('onset_accuracy', 0):.4f}")
+    
+    # Buffered onset summary if available
+    if 'buffered_onset_recall' in metrics:
+        buffer_k = metrics.get('buffer_frames', 5)
+        print(f"{'-'*70}")
+        print(f"Buffered Onset Metrics (±{buffer_k} frames tolerance):")
+        print(f"  Recall@{buffer_k}:    {metrics.get('buffered_onset_recall', 0):.4f}  (caught {metrics.get('buffered_onset_recall', 0)*100:.1f}% of expert onsets)")
+        print(f"  Precision@{buffer_k}: {metrics.get('buffered_onset_precision', 0):.4f}  ({metrics.get('buffered_onset_precision', 0)*100:.1f}% of predictions were real)")
+        print(f"  F1@{buffer_k}:        {metrics.get('buffered_onset_f1', 0):.4f}")
+        print(f"  True onsets: {metrics.get('num_true_onsets', 0):,}, Pred onsets: {metrics.get('num_pred_onsets', 0):,}")
+        
+        # Per-action buffered recall if available
+        if 'per_action_buffered_recall' in metrics:
+            print(f"\n  Per-Action Buffered Recall@{buffer_k}:")
+            for i, action_name in enumerate(action_names):
+                recall = metrics['per_action_buffered_recall'][i]
+                prec = metrics['per_action_buffered_precision'][i] if 'per_action_buffered_precision' in metrics else 0
+                print(f"    {action_name:<15} Recall: {recall:.4f}  Precision: {prec:.4f}")
     
     print(f"{'='*70}\n")
 

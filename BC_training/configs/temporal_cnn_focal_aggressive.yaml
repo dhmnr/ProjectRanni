@@ -56,6 +56,7 @@ training:
 evaluation:
   eval_every_n_epochs: 1
   metrics_threshold: 0.5
+  onset_buffer_frames: 5   # ±5 frames tolerance for buffered onset metrics (~167ms at 30fps)
 
 logging:
   use_wandb: true

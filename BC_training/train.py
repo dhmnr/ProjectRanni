@@ -40,6 +40,7 @@ from common.metrics import (
     compute_per_action_metrics,
     compute_action_distribution_distance,
     compute_onset_metrics,
+    compute_buffered_onset_metrics,
     format_metrics_for_logging,
     print_metrics_summary,
 )
@@ -768,10 +769,24 @@ def evaluate(
     
     # Compute onset metrics for temporal models
     onset_metrics = {}
+    buffered_onset_metrics = {}
     if is_temporal and all_previous_actions:
         all_previous_actions = np.concatenate(all_previous_actions, axis=0)
         onset_metrics = compute_onset_metrics(
             all_predictions, all_targets, all_previous_actions, threshold=0.5
+        )
+        
+        # Compute buffered onset metrics
+        # Create "previous predictions" by shifting predictions array
+        # First frame has no previous, so we use zeros (no action)
+        prev_predictions = np.zeros_like(all_predictions)
+        prev_predictions[1:] = all_predictions[:-1]
+        
+        # Get buffer size from config (default 5 frames = ~167ms at 30fps)
+        buffer_frames = config.get('evaluation', {}).get('onset_buffer_frames', 5)
+        buffered_onset_metrics = compute_buffered_onset_metrics(
+            all_predictions, all_targets, all_previous_actions, prev_predictions,
+            threshold=0.5, buffer_frames=buffer_frames
         )
     
     # Ensure all scalar values are Python floats
@@ -781,6 +796,7 @@ def evaluate(
         **per_action_metrics,
         **dist_metrics,
         **onset_metrics,
+        **buffered_onset_metrics,
     }
     
     return metrics
