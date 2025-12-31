@@ -855,7 +855,7 @@ def train(config_path: str):
     
     # Check if this is a temporal model
     model_name = config['model']['name']
-    is_temporal = model_name in ['temporal_cnn', 'gru']
+    is_temporal = model_name in ['temporal_cnn', 'gru', 'causal_transformer']
     
     if is_temporal:
         # Temporal dataset with frame stacking and action history
@@ -1035,6 +1035,54 @@ def train(config_path: str):
             dropout_rate=config['model']['dropout_rate'],
             use_batch_norm=config['model']['use_batch_norm'],
         )
+    elif model_name == 'causal_transformer':
+        from models.causal_transformer import create_model
+        
+        # Get temporal config
+        temporal_config = config.get('temporal', {})
+        num_history_frames = temporal_config.get('num_history_frames', 4)
+        num_action_history = temporal_config.get('num_action_history', 4)
+        
+        # Transformer specific config
+        d_model = config['model'].get('d_model', 256)
+        num_heads = config['model'].get('num_heads', 4)
+        num_layers = config['model'].get('num_layers', 2)
+        d_ff = config['model'].get('d_ff', 512)
+        max_seq_len = config['model'].get('max_seq_len', 32)
+        
+        # State features (optional)
+        num_state_features = state_preprocessor.continuous_dim if use_state else 10
+        anim_embed_dim = config.get('state_preprocessing', {}).get('anim_embed_dim', 16)
+        
+        console.print(f"[cyan]Transformer config: d_model={d_model}, heads={num_heads}, layers={num_layers}, d_ff={d_ff}[/cyan]")
+        console.print(f"[cyan]Temporal config: {num_history_frames} history frames, {num_action_history} action history[/cyan]")
+        if use_state:
+            console.print(f"[cyan]Continuous state features: {num_state_features}[/cyan]")
+            console.print(f"[cyan]Hero anim vocab size: {state_preprocessor.hero_vocab_size}[/cyan]")
+            console.print(f"[cyan]NPC anim vocab size: {state_preprocessor.npc_vocab_size}[/cyan]")
+        
+        model = create_model(
+            num_actions=num_actions,
+            num_history_frames=num_history_frames,
+            num_action_history=num_action_history,
+            d_model=d_model,
+            num_heads=num_heads,
+            num_layers=num_layers,
+            d_ff=d_ff,
+            max_seq_len=max_seq_len,
+            use_state=use_state,
+            num_state_features=num_state_features,
+            hero_anim_vocab_size=state_preprocessor.hero_vocab_size if use_state else 67,
+            npc_anim_vocab_size=state_preprocessor.npc_vocab_size if use_state else 54,
+            anim_embed_dim=anim_embed_dim,
+            conv_features=tuple(config['model']['conv_features']),
+            dense_features=tuple(config['model']['dense_features']),
+            state_encoder_features=tuple(config['model'].get('state_encoder_features', [64, 64])),
+            state_output_features=config['model'].get('state_output_features', 64),
+            action_history_features=config['model'].get('action_history_features', 64),
+            dropout_rate=config['model']['dropout_rate'],
+            use_batch_norm=config['model']['use_batch_norm'],
+        )
     else:
         raise ValueError(f"Unknown model: {model_name}")
     
@@ -1060,7 +1108,7 @@ def train(config_path: str):
     rng, init_rng = jax.random.split(rng)
     
     # Hybrid state models use animation embeddings
-    use_anim_embeddings = (model_name == 'hybrid_state') or (model_name in ['temporal_cnn', 'gru'] and use_state)
+    use_anim_embeddings = (model_name == 'hybrid_state') or (model_name in ['temporal_cnn', 'gru', 'causal_transformer'] and use_state)
     
     state = create_train_state(
         model=model,

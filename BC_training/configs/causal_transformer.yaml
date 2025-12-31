@@ -1,0 +1,89 @@
+# Causal Transformer Configuration
+# Self-attention with causal masking for temporal reasoning
+
+dataset:
+  path: "./dataset/margit_100_256x144.zarr"
+  train_ratio: 0.8
+  val_ratio: 0.2
+  split_seed: 42
+  normalize_frames: true
+  use_state: true
+  validate_episodes: true
+
+# Temporal context settings
+temporal:
+  num_history_frames: 4   # 4 past frames + current = 5 total
+  num_action_history: 4   # 4 past actions
+  frame_skip: 1           # Every frame
+
+# State preprocessing
+state_preprocessing:
+  normalize_resources: true
+  compute_distances: true
+  anim_embed_dim: 16
+
+model:
+  name: causal_transformer
+  
+  # Transformer configuration
+  d_model: 256            # Model dimension (must match CNN output or will project)
+  num_heads: 4            # Number of attention heads
+  num_layers: 2           # Number of transformer blocks
+  d_ff: 512               # Feed-forward hidden dimension (typically 2-4x d_model)
+  max_seq_len: 32         # Max sequence length for positional embeddings
+  
+  # CNN encoder (shared across frames)
+  conv_features: [32, 64, 128, 256]
+  
+  # Action history encoder
+  action_history_features: 64
+  
+  # State encoder (MLP)
+  state_encoder_features: [64, 64]
+  state_output_features: 64
+  
+  # Fusion dense layers (after transformer + state concat)
+  dense_features: [256, 128]
+  dropout_rate: 0.1       # Transformer typically uses lower dropout
+  use_batch_norm: true
+
+training:
+  batch_size: 32
+  num_epochs: 100
+  learning_rate: 0.0005   # Slightly lower LR for transformers
+  weight_decay: 0.01      # Higher weight decay for transformers (AdamW style)
+  lr_schedule:
+    type: cosine
+    warmup_epochs: 10     # More warmup for transformers
+    min_lr: 0.00001
+  use_class_weights: true
+  label_smoothing: 0.0
+  grad_clip_norm: 1.0
+  checkpoint_dir: "./checkpoints/causal_transformer"
+  save_every_n_epochs: 10
+  keep_last_n_checkpoints: 3
+  
+  # Loss function
+  loss:
+    type: bce
+
+evaluation:
+  eval_every_n_epochs: 1
+  metrics_threshold: 0.5
+  onset_buffer_frames: 5
+
+logging:
+  use_wandb: true
+  wandb_project: "ProjectRanni-BC"
+  wandb_entity: "dhmnr-projects"
+  wandb_run_name: "causal_transformer_d256_h4_l2"
+  log_every_n_steps: 50
+  log_gradients: false
+
+system:
+  seed: 42
+  num_workers: 4
+  pin_memory: false
+
+
+

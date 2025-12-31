@@ -51,6 +51,9 @@ uv run -m BC_training --config configs/pure_cnn.yaml
 cd BC_training
 uv run python train.py --config configs/pure_cnn.yaml
 
+# analyze dataset
+uv run -m BC_training.analyze_dataset --dataset your_path
+
 # Specify a different config
 uv run -m BC_training --config configs/your_custom_config.yaml
 ```
