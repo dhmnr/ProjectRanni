@@ -30,7 +30,9 @@ fi
 if ! command -v uv &> /dev/null; then
     echo "==> Installing uv..."
     curl -LsSf https://astral.sh/uv/install.sh | sh
-    source "$HOME/.local/bin/env"
+    if ! command -v uv &> /dev/null; then
+        source "$HOME/.local/bin/env"
+    fi
 else
     echo "==> uv already installed"
 fi
