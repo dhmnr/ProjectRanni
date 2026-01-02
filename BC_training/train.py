@@ -767,27 +767,36 @@ def evaluate(
     per_action_metrics = compute_per_action_metrics(all_predictions, all_targets, threshold=0.5)
     dist_metrics = compute_action_distribution_distance(all_predictions, all_targets, threshold=0.5)
     
-    # Compute onset metrics for temporal models
+    # Compute onset metrics for ALL models
+    # For temporal models, we have action_history; for non-temporal, we infer from targets
     onset_metrics = {}
     buffered_onset_metrics = {}
+    
     if is_temporal and all_previous_actions:
+        # Temporal models: use action_history for previous actions
         all_previous_actions = np.concatenate(all_previous_actions, axis=0)
-        onset_metrics = compute_onset_metrics(
-            all_predictions, all_targets, all_previous_actions, threshold=0.5
-        )
-        
-        # Compute buffered onset metrics
-        # Create "previous predictions" by shifting predictions array
+    else:
+        # Non-temporal models: infer previous actions by shifting targets
         # First frame has no previous, so we use zeros (no action)
-        prev_predictions = np.zeros_like(all_predictions)
-        prev_predictions[1:] = all_predictions[:-1]
-        
-        # Get buffer size from config (default 5 frames = ~167ms at 30fps)
-        buffer_frames = config.get('evaluation', {}).get('onset_buffer_frames', 5)
-        buffered_onset_metrics = compute_buffered_onset_metrics(
-            all_predictions, all_targets, all_previous_actions, prev_predictions,
-            threshold=0.5, buffer_frames=buffer_frames
-        )
+        all_previous_actions = np.zeros_like(all_targets)
+        all_previous_actions[1:] = all_targets[:-1]
+    
+    # Always compute onset metrics
+    onset_metrics = compute_onset_metrics(
+        all_predictions, all_targets, all_previous_actions, threshold=0.5
+    )
+    
+    # Compute buffered onset metrics
+    # Create "previous predictions" by shifting predictions array
+    prev_predictions = np.zeros_like(all_predictions)
+    prev_predictions[1:] = all_predictions[:-1]
+    
+    # Get buffer size from config (default 5 frames = ~167ms at 30fps)
+    buffer_frames = config.get('evaluation', {}).get('onset_buffer_frames', 5)
+    buffered_onset_metrics = compute_buffered_onset_metrics(
+        all_predictions, all_targets, all_previous_actions, prev_predictions,
+        threshold=0.5, buffer_frames=buffer_frames
+    )
     
     # Ensure all scalar values are Python floats
     metrics = {
