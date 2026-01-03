@@ -141,6 +141,8 @@ def compute_onset_metrics(
             'onset_ratio': 0.0,
             'per_action_onset_accuracy': np.zeros(targets.shape[1]),
             'per_action_onset_recall': np.zeros(targets.shape[1]),
+            'per_action_onset_start_recall': np.zeros(targets.shape[1]),
+            'per_action_onset_end_recall': np.zeros(targets.shape[1]),
         }
     
     # Filter to onset frames only
@@ -157,6 +159,9 @@ def compute_onset_metrics(
     per_action_onset_acc = np.zeros(num_actions)
     per_action_onset_recall = np.zeros(num_actions)
     
+    per_action_onset_start_recall = np.zeros(num_actions)
+    per_action_onset_end_recall = np.zeros(num_actions)
+    
     for i in range(num_actions):
         # Frames where THIS action changed
         action_i_changed = onset_targets[:, i] != onset_previous[:, i]
@@ -165,18 +170,29 @@ def compute_onset_metrics(
             correct = onset_preds[action_i_changed, i] == onset_targets[action_i_changed, i]
             per_action_onset_acc[i] = np.mean(correct)
             
-            # Recall for action START: when action turned ON, did we predict ON?
+            # Recall for action START (0→1): when action turned ON, did we predict ON?
             action_started = (onset_previous[:, i] == 0) & (onset_targets[:, i] == 1)
             if np.sum(action_started) > 0:
-                recalled = onset_preds[action_started, i] == 1
-                per_action_onset_recall[i] = np.mean(recalled)
+                recalled_start = onset_preds[action_started, i] == 1
+                per_action_onset_start_recall[i] = np.mean(recalled_start)
+            
+            # Recall for action END (1→0): when action turned OFF, did we predict OFF?
+            action_ended = (onset_previous[:, i] == 1) & (onset_targets[:, i] == 0)
+            if np.sum(action_ended) > 0:
+                recalled_end = onset_preds[action_ended, i] == 0
+                per_action_onset_end_recall[i] = np.mean(recalled_end)
+            
+            # Combined bidirectional recall: all changes correctly predicted
+            per_action_onset_recall[i] = np.mean(correct)  # Same as accuracy on changed frames
     
     return {
         'onset_accuracy': float(onset_accuracy),
         'onset_count': int(num_onset_frames),
         'onset_ratio': float(num_onset_frames / len(targets)),
         'per_action_onset_accuracy': per_action_onset_acc,
-        'per_action_onset_recall': per_action_onset_recall,  # Key metric!
+        'per_action_onset_recall': per_action_onset_recall,  # Bidirectional: both 0→1 and 1→0
+        'per_action_onset_start_recall': per_action_onset_start_recall,  # 0→1 only
+        'per_action_onset_end_recall': per_action_onset_end_recall,  # 1→0 only
     }
 
 

@@ -271,6 +271,17 @@ def create_learning_rate_schedule(config: Dict) -> optax.Schedule:
 _USE_FOCAL_LOSS = False
 _FOCAL_GAMMA = 2.0
 _FOCAL_ALPHA = None
+_ONSET_WEIGHT = 1.0  # Weight multiplier for onset frames (>1 to penalize copying)
+
+
+def _compute_onset_weights(
+    labels: jnp.ndarray,
+    previous_actions: jnp.ndarray,
+    onset_weight: float,
+) -> jnp.ndarray:
+    """Compute per-sample weights based on onset detection."""
+    action_changed = jnp.any(labels != previous_actions, axis=1)
+    return jnp.where(action_changed, onset_weight, 1.0)
 
 
 def compute_loss(
@@ -280,8 +291,10 @@ def compute_loss(
     use_focal: bool = False,
     focal_gamma: float = 2.0,
     focal_alpha: Optional[float] = None,
+    previous_actions: Optional[jnp.ndarray] = None,
+    onset_weight: float = 1.0,
 ) -> jnp.ndarray:
-    """Compute loss with configurable loss function.
+    """Compute loss with configurable loss function and onset weighting.
     
     Args:
         logits: Model outputs [B, num_actions]
@@ -290,6 +303,8 @@ def compute_loss(
         use_focal: Whether to use focal loss
         focal_gamma: Focal loss gamma parameter
         focal_alpha: Focal loss alpha parameter
+        previous_actions: Previous frame actions for onset weighting [B, num_actions]
+        onset_weight: Weight multiplier for onset frames (>1 to upweight action changes)
         
     Returns:
         Loss value (scalar)
@@ -300,6 +315,8 @@ def compute_loss(
             gamma=focal_gamma, 
             alpha=focal_alpha,
             weights=weights if weights is not None else None,
+            previous_actions=previous_actions,
+            onset_weight=onset_weight,
         )
     else:
         # Standard BCE
@@ -311,20 +328,27 @@ def compute_loss(
         if weights is not None:
             loss = loss * weights[None, :]
         
+        # Apply onset weighting if previous_actions provided
+        if previous_actions is not None and onset_weight > 1.0:
+            sample_weights = _compute_onset_weights(labels, previous_actions, onset_weight)
+            loss_per_sample = jnp.mean(loss, axis=1)  # [batch]
+            return jnp.sum(loss_per_sample * sample_weights) / jnp.sum(sample_weights)
+        
         return jnp.mean(loss)
 
 
 # Wrapper functions that use module-level config
 # These MUST be created before JIT compilation to capture config values
-def _create_loss_fn(use_focal: bool, focal_gamma: float, focal_alpha: Optional[float]):
+def _create_loss_fn(use_focal: bool, focal_gamma: float, focal_alpha: Optional[float], onset_weight: float = 1.0):
     """Create a loss function with the specified configuration."""
-    def loss_fn(logits, labels, weights=None):
-        return compute_loss(logits, labels, weights, use_focal, focal_gamma, focal_alpha)
+    def loss_fn(logits, labels, weights=None, previous_actions=None):
+        return compute_loss(logits, labels, weights, use_focal, focal_gamma, focal_alpha, 
+                           previous_actions, onset_weight)
     return loss_fn
 
 
 # Default loss function (standard BCE)
-_current_loss_fn = _create_loss_fn(False, 2.0, None)
+_current_loss_fn = _create_loss_fn(False, 2.0, None, 1.0)
 
 
 def compute_accuracy_jax(predictions: jnp.ndarray, targets: jnp.ndarray, threshold: float = 0.5) -> jnp.ndarray:
@@ -527,10 +551,14 @@ def train_step_temporal(state: TrainState, batch: Dict, action_weights: jnp.ndar
                 rngs={'dropout': dropout_rng},
             )
         
+        # Get previous action for onset weighting (last in history = t-1)
+        previous_actions = batch['action_history'][:, -1, :]
+        
         loss = _current_loss_fn(
             logits,
             batch['actions'],
             weights=action_weights,
+            previous_actions=previous_actions,
         )
         
         new_batch_stats = new_variables.get('batch_stats', None)
@@ -571,10 +599,14 @@ def train_step_temporal_with_state(state: TrainState, batch: Dict, action_weight
             rngs={'dropout': dropout_rng},
         )
         
+        # Get previous action for onset weighting (last in history = t-1)
+        previous_actions = batch['action_history'][:, -1, :]
+        
         loss = _current_loss_fn(
             logits,
             batch['actions'],
             weights=action_weights,
+            previous_actions=previous_actions,
         )
         
         new_batch_stats = new_variables.get('batch_stats', None)
@@ -612,10 +644,14 @@ def train_step_temporal_no_state(state: TrainState, batch: Dict, action_weights:
             rngs={'dropout': dropout_rng},
         )
         
+        # Get previous action for onset weighting (last in history = t-1)
+        previous_actions = batch['action_history'][:, -1, :]
+        
         loss = _current_loss_fn(
             logits,
             batch['actions'],
             weights=action_weights,
+            previous_actions=previous_actions,
         )
         
         new_batch_stats = new_variables.get('batch_stats', None)
@@ -1140,15 +1176,19 @@ def train(config_path: str):
     global _current_loss_fn
     loss_config = config.get('training', {}).get('loss', {})
     loss_type = loss_config.get('type', 'bce')
+    onset_weight = loss_config.get('onset_weight', 1.0)  # Weight for onset frames
     
     if loss_type == 'focal':
         focal_gamma = loss_config.get('gamma', 2.0)
         focal_alpha = loss_config.get('alpha', None)
-        _current_loss_fn = _create_loss_fn(use_focal=True, focal_gamma=focal_gamma, focal_alpha=focal_alpha)
-        console.print(f"[cyan]Using Focal Loss (γ={focal_gamma}, α={focal_alpha})[/cyan]")
+        _current_loss_fn = _create_loss_fn(use_focal=True, focal_gamma=focal_gamma, focal_alpha=focal_alpha, onset_weight=onset_weight)
+        console.print(f"[cyan]Using Focal Loss (γ={focal_gamma}, α={focal_alpha}, onset_weight={onset_weight})[/cyan]")
     else:
-        _current_loss_fn = _create_loss_fn(use_focal=False, focal_gamma=2.0, focal_alpha=None)
-        console.print("[cyan]Using Binary Cross Entropy Loss[/cyan]")
+        _current_loss_fn = _create_loss_fn(use_focal=False, focal_gamma=2.0, focal_alpha=None, onset_weight=onset_weight)
+        if onset_weight > 1.0:
+            console.print(f"[cyan]Using BCE Loss with onset weighting ({onset_weight}x)[/cyan]")
+        else:
+            console.print("[cyan]Using Binary Cross Entropy Loss[/cyan]")
     
     # Calculate total steps
     batch_size = config['training']['batch_size']
