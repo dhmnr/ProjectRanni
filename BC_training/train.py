@@ -782,7 +782,7 @@ def evaluate(
                 all_targets.append(np.asarray(batch['actions']))
                 
                 # Collect previous actions for onset metrics (temporal models have action_history)
-                if is_temporal and 'action_history' in batch:
+                if is_temporal and 'action_history' in batch and batch['action_history'].shape[1] > 0:
                     # Last action in history = previous action
                     prev_actions = np.asarray(batch['action_history'][:, -1, :])
                     all_previous_actions.append(prev_actions)
@@ -796,7 +796,7 @@ def evaluate(
             all_predictions.append(np.asarray(predictions))
             all_targets.append(np.asarray(batch['actions']))
             
-            if is_temporal and 'action_history' in batch:
+            if is_temporal and 'action_history' in batch and batch['action_history'].shape[1] > 0:
                 prev_actions = np.asarray(batch['action_history'][:, -1, :])
                 all_previous_actions.append(prev_actions)
             
