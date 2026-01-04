@@ -214,16 +214,18 @@ class GRUTemporalModel(nn.Module):
         if self.dropout_rate > 0 and training:
             hidden = nn.Dropout(rate=self.dropout_rate, deterministic=not training)(hidden)
         
-        # === Process action history ===
-        # Flatten and encode: [B, K, A] -> [B, K*A] -> [B, action_feat]
-        action_history_flat = action_history.reshape(batch_size, -1)
-        x_actions = nn.Dense(features=self.action_history_features)(action_history_flat)
-        if self.use_batch_norm:
-            x_actions = nn.BatchNorm(use_running_average=not training)(x_actions)
-        x_actions = nn.relu(x_actions)
-        
         # === Combine features ===
-        features_to_concat = [hidden, x_actions]
+        features_to_concat = [hidden]
+        
+        # === Process action history (if provided) ===
+        if self.num_action_history > 0:
+            # Flatten and encode: [B, K, A] -> [B, K*A] -> [B, action_feat]
+            action_history_flat = action_history.reshape(batch_size, -1)
+            x_actions = nn.Dense(features=self.action_history_features)(action_history_flat)
+            if self.use_batch_norm:
+                x_actions = nn.BatchNorm(use_running_average=not training)(x_actions)
+            x_actions = nn.relu(x_actions)
+            features_to_concat.append(x_actions)
         
         # === Optional: State features ===
         if self.use_state and state is not None:

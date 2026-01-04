@@ -552,7 +552,11 @@ def train_step_temporal(state: TrainState, batch: Dict, action_weights: jnp.ndar
             )
         
         # Get previous action for onset weighting (last in history = t-1)
-        previous_actions = batch['action_history'][:, -1, :]
+        # Only if action history is non-empty (shape known at trace time)
+        if batch['action_history'].shape[1] > 0:
+            previous_actions = batch['action_history'][:, -1, :]
+        else:
+            previous_actions = None
         
         loss = _current_loss_fn(
             logits,
@@ -600,7 +604,10 @@ def train_step_temporal_with_state(state: TrainState, batch: Dict, action_weight
         )
         
         # Get previous action for onset weighting (last in history = t-1)
-        previous_actions = batch['action_history'][:, -1, :]
+        if batch['action_history'].shape[1] > 0:
+            previous_actions = batch['action_history'][:, -1, :]
+        else:
+            previous_actions = None
         
         loss = _current_loss_fn(
             logits,
@@ -645,7 +652,10 @@ def train_step_temporal_no_state(state: TrainState, batch: Dict, action_weights:
         )
         
         # Get previous action for onset weighting (last in history = t-1)
-        previous_actions = batch['action_history'][:, -1, :]
+        if batch['action_history'].shape[1] > 0:
+            previous_actions = batch['action_history'][:, -1, :]
+        else:
+            previous_actions = None
         
         loss = _current_loss_fn(
             logits,

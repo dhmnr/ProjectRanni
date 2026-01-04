@@ -514,16 +514,21 @@ class TemporalGameplayDataset:
         frames = np.stack(frames, axis=0)
         
         # === Action history (past actions, not including current) ===
-        action_indices = [frame_idx - i - 1 for i in range(self.num_action_history - 1, -1, -1)]
-        # [t-k, t-k+1, ..., t-1]
-        
-        action_history = []
-        for ai in action_indices:
-            action = np.array(ep['actions'][ai], dtype=np.float32)
-            action_history.append(action)
-        
-        # Stack: [num_action_history, num_actions]
-        action_history = np.stack(action_history, axis=0)
+        if self.num_action_history > 0:
+            action_indices = [frame_idx - i - 1 for i in range(self.num_action_history - 1, -1, -1)]
+            # [t-k, t-k+1, ..., t-1]
+            
+            action_history = []
+            for ai in action_indices:
+                action = np.array(ep['actions'][ai], dtype=np.float32)
+                action_history.append(action)
+            
+            # Stack: [num_action_history, num_actions]
+            action_history = np.stack(action_history, axis=0)
+        else:
+            # No action history - create empty array with correct shape
+            num_actions = len(ep['actions'][frame_idx])
+            action_history = np.zeros((0, num_actions), dtype=np.float32)
         
         # === Current action (target) ===
         actions = np.array(ep['actions'][frame_idx], dtype=np.float32)
