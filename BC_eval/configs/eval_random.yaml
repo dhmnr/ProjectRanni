@@ -1,0 +1,54 @@
+# BC Evaluation Config - Random Policy Baseline
+# Use random actions to establish baseline and test pipeline
+
+# Agent configuration
+agent:
+  type: random
+  num_actions: 7
+  action_prob: 0.1  # Probability of each action being active
+  seed: 42  # Random seed for reproducibility
+
+# EldenGym environment configuration
+environment:
+  scenario_name: "margit"
+  siphon_config: "./gameplay_pipeline/configs/er_siphon_config.toml"
+  keybinds: "./gameplay_pipeline/configs/keybinds.json"
+  host: "localhost:50051"
+  max_steps: 5000  # Shorter episodes for random policy
+  # Memory attributes (not needed for random, but included for consistency)
+  memory_attributes:
+    - "HeroHp"
+    - "HeroMaxHp"
+    - "HeroSp"
+    - "HeroMaxSp"
+    - "HeroFp"
+    - "HeroMaxFp"
+    - "HeroGlobalPosX"
+    - "HeroGlobalPosY"
+    - "HeroGlobalPosZ"
+    - "HeroAngle"
+    - "HeroAnimId"
+    - "NpcHp"
+    - "NpcMaxHp"
+    - "NpcId"
+    - "NpcGlobalPosX"
+    - "NpcGlobalPosY"
+    - "NpcGlobalPosZ"
+    - "NpcGlobalPosAngle"
+    - "NpcAnimId"
+
+# Evaluation settings
+evaluation:
+  num_episodes: 5
+  action_threshold: 0.5
+  render: false
+  max_steps_per_episode: null
+  frame_shape: [3, 144, 256]
+
+# Logging configuration
+logging:
+  use_wandb: false
+  wandb_project: "ProjectRanni-Eval"
+  wandb_entity: null
+  wandb_run_name: "eval_random_baseline"
+

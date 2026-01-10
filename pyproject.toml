@@ -11,7 +11,7 @@ yt_data_pipeline = [
     "easyocr>=1.7.0",
     "h5py>=3.15.1",
     "matplotlib>=3.7.0",
-    "numpy<2.0",
+    "numpy>=2.0",
     "opencv-python>=4.8.0,<5.0",
     "pillow>=12.0.0",
     "rich>=13.0.0",
@@ -26,7 +26,7 @@ gameplay_pipeline = [
     "pandas>=2.3.3",
     "seaborn>=0.13.2",
     "opencv-python>=4.8.0,<5.0",
-    "numpy<2.0",
+    "numpy>=2.0",
     "zarr>=2.18.0",
 ]
 bc_training = [
@@ -42,7 +42,19 @@ bc_training = [
     "matplotlib>=3.7.0",
     "pandas>=2.3.3",
     "tqdm>=4.65.0",
-    "numpy<2.0",
+    "numpy>=2.0",
+]
+bc_eval = [
+    "eldengym>=0.3.1",
+    "jax>=0.4.26",  # 0.4.26+ supports numpy 2.0
+    "jaxlib>=0.4.26",
+    "flax>=0.8.0",
+    "omegaconf>=2.3.0",
+    "pyyaml>=6.0",
+    "wandb>=0.16.0",
+    "rich>=13.0.0",
+    "numpy>=2.0",  # Match eldengym's numpy version
+    "opencv-python>=4.8.0,<5.0",
 ]
 dev = [
     "ipykernel>=7.1.0",
@@ -50,4 +62,4 @@ dev = [
 ]
 
 [tool.uv]
-default-groups = ["yt_data_pipeline", "gameplay_pipeline", "bc_training", "dev"]
+default-groups = ["yt_data_pipeline", "gameplay_pipeline", "bc_training", "bc_eval", "dev"]

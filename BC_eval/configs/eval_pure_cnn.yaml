@@ -1,0 +1,58 @@
+# BC Evaluation Config - Pure CNN Model
+# Evaluate vision-only model without state features
+
+# Agent configuration
+agent:
+  type: model
+
+# Model checkpoint
+checkpoint:
+  path: "./BC_training/checkpoints/pure_cnn/best.pkl"
+  training_config: "./BC_training/configs/pure_cnn.yaml"
+  # Animation mappings not needed for pure_cnn (vision-only)
+  anim_mappings_path: null
+
+# EldenGym environment configuration
+environment:
+  scenario_name: "margit"
+  siphon_config: "./gameplay_pipeline/configs/er_siphon_config.toml"
+  keybinds: "./gameplay_pipeline/configs/keybinds.json"
+  host: "localhost:50051"
+  max_steps: 10000
+  # Memory attributes (pure_cnn is vision-only but included for metrics/logging)
+  memory_attributes:
+    - "HeroHp"
+    - "HeroMaxHp"
+    - "HeroSp"
+    - "HeroMaxSp"
+    - "HeroFp"
+    - "HeroMaxFp"
+    - "HeroGlobalPosX"
+    - "HeroGlobalPosY"
+    - "HeroGlobalPosZ"
+    - "HeroAngle"
+    - "HeroAnimId"
+    - "NpcHp"
+    - "NpcMaxHp"
+    - "NpcId"
+    - "NpcGlobalPosX"
+    - "NpcGlobalPosY"
+    - "NpcGlobalPosZ"
+    - "NpcGlobalPosAngle"
+    - "NpcAnimId"
+
+# Evaluation settings
+evaluation:
+  num_episodes: 10
+  action_threshold: 0.5
+  render: false
+  max_steps_per_episode: null
+  frame_shape: [3, 288, 512]  # Match training resolution
+
+# Logging configuration
+logging:
+  use_wandb: false
+  wandb_project: "ProjectRanni-Eval"
+  wandb_entity: null
+  wandb_run_name: "eval_pure_cnn"
+

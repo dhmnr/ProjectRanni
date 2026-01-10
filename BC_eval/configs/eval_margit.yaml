@@ -1,0 +1,59 @@
+# BC Evaluation Config - Margit Boss Fight
+# Evaluate a trained BC model against Margit
+
+# Agent configuration
+agent:
+  type: model  # 'model' or 'random'
+
+# Model checkpoint (required for agent.type: model)
+checkpoint:
+  path: "./BC_training/checkpoints/temporal_cnn/best.pkl"
+  training_config: "./BC_training/configs/temporal_cnn.yaml"
+  # Animation ID mappings for state preprocessing (auto-detected from dataset path if null)
+  anim_mappings_path: "./dataset/anim_id_mappings.json"
+
+# EldenGym environment configuration
+environment:
+  scenario_name: "margit"
+  siphon_config: "./gameplay_pipeline/configs/er_siphon_config.toml"
+  keybinds: "./gameplay_pipeline/configs/keybinds.json"
+  host: "localhost:50051"
+  max_steps: 10000  # Max steps per episode (null for unlimited)
+  # Memory attributes - MUST match what was used during training data collection
+  # All 19 attributes from BC_training/common/state_preprocessing.py STATE_INDICES
+  memory_attributes:
+    - "HeroHp"
+    - "HeroMaxHp"
+    - "HeroSp"
+    - "HeroMaxSp"
+    - "HeroFp"
+    - "HeroMaxFp"
+    - "HeroGlobalPosX"
+    - "HeroGlobalPosY"
+    - "HeroGlobalPosZ"
+    - "HeroAngle"
+    - "HeroAnimId"
+    - "NpcHp"
+    - "NpcMaxHp"
+    - "NpcId"
+    - "NpcGlobalPosX"
+    - "NpcGlobalPosY"
+    - "NpcGlobalPosZ"
+    - "NpcGlobalPosAngle"
+    - "NpcAnimId"
+
+# Evaluation settings
+evaluation:
+  num_episodes: 10
+  action_threshold: 0.5  # Threshold for converting probabilities to binary actions
+  render: false  # Whether to render frames (for visualization)
+  max_steps_per_episode: null  # Override environment max_steps
+  frame_shape: [3, 144, 256]  # C, H, W expected by model
+
+# Logging configuration
+logging:
+  use_wandb: false
+  wandb_project: "ProjectRanni-Eval"
+  wandb_entity: null  # Your wandb entity/username
+  wandb_run_name: "eval_margit_temporal_cnn"
+
