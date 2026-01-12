@@ -27,17 +27,26 @@ def load_keybinds(keybinds_path: Optional[str] = None) -> Tuple[Dict[str, str], 
     """
     Load keybinds mapping from JSON file and extract master action list.
     
+    Supports keybinds v2.0 format:
+    {
+        "actions": {
+            "action_name": {"index": 0, "key": "W", "mouse": "BUTTON5"},
+            ...
+        },
+        "version": "2.0"
+    }
+    
     Args:
-        keybinds_path: Path to keybinds.json file
+        keybinds_path: Path to keybinds JSON file (v2 format required)
         
     Returns:
-        Tuple of (raw_to_action_mapping, sorted_unique_actions)
-        - raw_to_action_mapping: Dict mapping raw keys to semantic action names
-        - sorted_unique_actions: Sorted list of all unique action names (master schema)
+        Tuple of (raw_to_action_mapping, indexed_actions)
+        - raw_to_action_mapping: Dict mapping raw keys/buttons to semantic action names
+        - indexed_actions: List of action names ordered by their index (master schema)
     """
     if keybinds_path is None:
-        # Default to configs/keybinds.json
-        keybinds_path = Path(__file__).parent / "configs" / "keybinds.json"
+        # Default to configs/keybinds_v2.json
+        keybinds_path = Path(__file__).parent / "configs" / "keybinds_v2.json"
     else:
         keybinds_path = Path(keybinds_path)
     
@@ -49,16 +58,59 @@ def load_keybinds(keybinds_path: Optional[str] = None) -> Tuple[Dict[str, str], 
     try:
         with open(keybinds_path, 'r') as f:
             data = json.load(f)
-            raw_to_action = data.get('keybinds', {})
             
-            if not raw_to_action:
-                raise ValueError("No 'keybinds' found in JSON file")
+            # Version check
+            version = data.get('version', '1.0')
+            if version.startswith('1.'):
+                console.print(f"[red]Error: Keybinds v1.x format is deprecated.[/red]")
+                console.print(f"[red]Please use keybinds v2.0 format with 'actions' and explicit 'index' fields.[/red]")
+                console.print(f"[red]See configs/keybinds_v2.json for the expected format.[/red]")
+                raise ValueError(f"Unsupported keybinds version: {version}. Use v2.0 format.")
             
-            # Extract unique action names (multiple keys can map to same action)
-            unique_actions = sorted(list(set(raw_to_action.values())))
+            if not version.startswith('2.'):
+                console.print(f"[yellow]Warning: Unknown keybinds version {version}, attempting to parse as v2.0[/yellow]")
             
-            return raw_to_action, unique_actions
+            actions_dict = data.get('actions', {})
             
+            if not actions_dict:
+                raise ValueError("No 'actions' found in JSON file")
+            
+            # Build raw_to_action mapping and collect actions with indices
+            raw_to_action = {}
+            action_index_pairs = []
+            
+            for action_name, props in actions_dict.items():
+                if 'index' not in props:
+                    raise ValueError(f"Action '{action_name}' missing required 'index' field")
+                
+                index = props['index']
+                action_index_pairs.append((action_name, index))
+                
+                # Map keyboard key to action
+                if 'key' in props:
+                    raw_to_action[props['key']] = action_name
+                
+                # Map mouse button to action (alternate binding)
+                if 'mouse' in props:
+                    raw_to_action[props['mouse']] = action_name
+            
+            # Sort actions by index to create the master action list
+            action_index_pairs.sort(key=lambda x: x[1])
+            
+            # Validate indices are contiguous starting from 0
+            expected_indices = list(range(len(action_index_pairs)))
+            actual_indices = [idx for _, idx in action_index_pairs]
+            if actual_indices != expected_indices:
+                console.print(f"[yellow]Warning: Action indices are not contiguous (0 to {len(action_index_pairs)-1})[/yellow]")
+                console.print(f"[yellow]Expected: {expected_indices}, Got: {actual_indices}[/yellow]")
+            
+            indexed_actions = [action_name for action_name, _ in action_index_pairs]
+            
+            return raw_to_action, indexed_actions
+            
+    except json.JSONDecodeError as e:
+        console.print(f"[red]Error parsing keybinds JSON: {e}[/red]")
+        raise
     except Exception as e:
         console.print(f"[red]Error loading keybinds: {e}[/red]")
         raise
@@ -552,7 +604,7 @@ def main():
         '--keybinds',
         type=str,
         default=None,
-        help='Path to keybinds.json file (default: configs/keybinds.json) - REQUIRED for consistent action schema'
+        help='Path to keybinds JSON file v2.0 format (default: configs/keybinds_v2.json) - REQUIRED for consistent action schema'
     )
     parser.add_argument(
         '--resolution',
