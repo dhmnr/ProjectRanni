@@ -62,8 +62,8 @@ class LoadedModel:
         # Most configs store this in the model params directly or we infer from output layer
         if "num_actions" in self.config.get("model", {}):
             return self.config["model"]["num_actions"]
-        # Default for Elden Ring dataset
-        return 7
+        # Default for Elden Ring dataset (13 semantic actions from keybinds_v2.json)
+        return 13
 
     def __call__(
         self,
@@ -160,7 +160,7 @@ def load_checkpoint(checkpoint_path: str) -> Tuple[Dict, int]:
 def load_model(
     checkpoint_path: str,
     training_config_path: str,
-    num_actions: int = 7,
+    num_actions: int = 13,  # 13 semantic actions from keybinds_v2.json
     anim_mappings_path: Optional[str] = None,
 ) -> LoadedModel:
     """Load a trained BC model for inference.

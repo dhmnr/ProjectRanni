@@ -16,7 +16,7 @@ checkpoint:
 environment:
   scenario_name: "margit"
   siphon_config: "./gameplay_pipeline/configs/er_siphon_config.toml"
-  keybinds: "./gameplay_pipeline/configs/keybinds.json"
+  keybinds: "./gameplay_pipeline/configs/keybinds_v2.json"  # Semantic actions (13 actions)
   host: "localhost:50051"
   max_steps: 10000
   # Memory attributes (pure_cnn is vision-only but included for metrics/logging)

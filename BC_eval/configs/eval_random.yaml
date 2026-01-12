@@ -4,7 +4,7 @@
 # Agent configuration
 agent:
   type: random
-  num_actions: 7
+  num_actions: 13  # Semantic actions from keybinds_v2.json
   action_prob: 0.1  # Probability of each action being active
   seed: 42  # Random seed for reproducibility
 
@@ -12,7 +12,7 @@ agent:
 environment:
   scenario_name: "margit"
   siphon_config: "./gameplay_pipeline/configs/er_siphon_config.toml"
-  keybinds: "./gameplay_pipeline/configs/keybinds.json"
+  keybinds: "./gameplay_pipeline/configs/keybinds_v2.json"  # Semantic actions (13 actions)
   host: "localhost:50051"
   max_steps: 5000  # Shorter episodes for random policy
   # Memory attributes (not needed for random, but included for consistency)

@@ -45,7 +45,7 @@ bc_training = [
     "numpy>=2.0",
 ]
 bc_eval = [
-    "eldengym>=0.3.1",
+    "eldengym>=0.5.0",
     "jax>=0.4.26",  # 0.4.26+ supports numpy 2.0
     "jaxlib>=0.4.26",
     "flax>=0.8.0",
