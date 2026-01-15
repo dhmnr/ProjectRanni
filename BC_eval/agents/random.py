@@ -16,14 +16,14 @@ class RandomAgent:
 
     def __init__(
         self,
-        num_actions: int = 7,
+        num_actions: int = 13,  # 13 semantic actions from keybinds_v2.json
         action_prob: float = 0.1,
         seed: Optional[int] = None,
     ):
         """Initialize random agent.
 
         Args:
-            num_actions: Number of binary actions
+            num_actions: Number of binary actions (default: 13 semantic actions)
             action_prob: Probability of each action being 1 (default: 0.1)
             seed: Random seed for reproducibility
         """

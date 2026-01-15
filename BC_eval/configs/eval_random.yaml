@@ -4,7 +4,7 @@
 # Agent configuration
 agent:
   type: random
-  num_actions: 7
+  num_actions: 13  # Semantic actions from keybinds_v2.json
   action_prob: 0.1  # Probability of each action being active
   seed: 42  # Random seed for reproducibility
 

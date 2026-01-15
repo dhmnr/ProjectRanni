@@ -79,7 +79,7 @@ class LoadedModel:
         except Exception:
             pass
 
-        # Default for Elden Ring dataset (13 actions)
+        # Default for Elden Ring dataset (13 semantic actions)
         return 13
 
     def __call__(
