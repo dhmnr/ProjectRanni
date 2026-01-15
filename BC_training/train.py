@@ -1594,12 +1594,27 @@ def evaluate(
     mean_recall = float(np.mean(per_action_metrics['per_action_recall']))
     mean_f1 = float(np.mean(per_action_metrics['per_action_f1_score']))
 
+    # Compute per-action distributions for logging
+    # Target distribution: mean activation per action (how often each action is active in data)
+    target_distribution = np.mean(all_targets, axis=0)  # [num_actions]
+    # Prediction distribution: mean predicted probability per action
+    pred_distribution = np.mean(all_predictions, axis=0)  # [num_actions]
+    # Binary prediction distribution (after thresholding)
+    binary_preds = (all_predictions > 0.5).astype(np.float32)
+    binary_pred_distribution = np.mean(binary_preds, axis=0)  # [num_actions]
+
     metrics = {
         'loss': float(avg_loss),
         'precision': mean_precision,
         'recall': mean_recall,
         'f1': mean_f1,
         **per_action_metrics,
+        # Distributions for wandb logging
+        '_target_distribution': target_distribution,
+        '_pred_distribution': pred_distribution,
+        '_binary_pred_distribution': binary_pred_distribution,
+        '_all_predictions': all_predictions,  # Raw predictions for histogram
+        '_all_targets': all_targets,  # Raw targets for histogram
     }
 
     return metrics
@@ -2461,6 +2476,25 @@ def train(config_path: str):
                             log_dict[f'val_{name}/precision'] = float(val_metrics['per_action_precision'][i])
                             log_dict[f'val_{name}/recall'] = float(val_metrics['per_action_recall'][i])
                             log_dict[f'val_{name}/f1'] = float(val_metrics['per_action_f1_score'][i])
+
+                        # Add distribution logging
+                        if '_target_distribution' in val_metrics:
+                            # Bar chart data for target vs prediction distribution
+                            target_dist = val_metrics['_target_distribution']
+                            pred_dist = val_metrics['_pred_distribution']
+                            binary_pred_dist = val_metrics['_binary_pred_distribution']
+
+                            # Log per-action activation rates
+                            for i, name in enumerate(action_names):
+                                log_dict[f'dist_{name}/target_rate'] = float(target_dist[i])
+                                log_dict[f'dist_{name}/pred_prob_mean'] = float(pred_dist[i])
+                                log_dict[f'dist_{name}/pred_binary_rate'] = float(binary_pred_dist[i])
+
+                            # Log histograms of prediction probabilities per action
+                            all_preds = val_metrics.get('_all_predictions')
+                            if all_preds is not None:
+                                for i, name in enumerate(action_names):
+                                    log_dict[f'hist_{name}/pred_probs'] = wandb.Histogram(all_preds[:, i])
 
                     wandb.log(log_dict)
 
