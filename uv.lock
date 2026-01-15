@@ -690,7 +690,7 @@ wheels = [
 
 [[package]]
 name = "eldengym"
-version = "0.4.1"
+version = "0.5.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "anthropic" },
@@ -703,9 +703,9 @@ dependencies = [
     { name = "pillow" },
     { name = "pysiphon" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/bf/0a/0cd9bfcc1734212c48cf941d6d2168043d521ebe8332819e50d48281e32e/eldengym-0.4.1.tar.gz", hash = "sha256:ff57f69ae0f2081728877a8557dfa4ceb060bf213b1af5bc853adb28d664919b", size = 237394, upload-time = "2026-01-10T23:56:50.592Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/5f/56/a10e9df109f216887bdfa189f83f866bad99c77c62fe12123e7c5db30a0f/eldengym-0.5.0.tar.gz", hash = "sha256:69e80ae9f6f38667358a7ae728d5be467223422dd6404e2d57cdf21efa018935", size = 238128, upload-time = "2026-01-12T10:19:55.7Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/66/1a/19fff38165401c5762218dfb567198b47decd206d7470c77813032330803/eldengym-0.4.1-py3-none-any.whl", hash = "sha256:a72224b41ede0adeed820857cb789c4e1964f5f7d6e516febb87c1ae024f6c55", size = 19116, upload-time = "2026-01-10T23:56:48.996Z" },
+    { url = "https://files.pythonhosted.org/packages/96/af/4e965e2d4218a873caba839adf34bd82422ec89505ffac26e67d43b6fdf6/eldengym-0.5.0-py3-none-any.whl", hash = "sha256:7145622e2bd07fe8d5678375c2dddf3b0b77e40fdc3f32311160a25dffb848b0", size = 20135, upload-time = "2026-01-12T10:19:54.494Z" },
 ]
 
 [[package]]
@@ -2953,7 +2953,7 @@ yt-data-pipeline = [
 
 [package.metadata.requires-dev]
 bc-eval = [
-    { name = "eldengym", specifier = ">=0.4.1" },
+    { name = "eldengym", specifier = ">=0.5.0" },
     { name = "flax", specifier = ">=0.8.0" },
     { name = "jax", specifier = ">=0.4.26" },
     { name = "jaxlib", specifier = ">=0.4.26" },
