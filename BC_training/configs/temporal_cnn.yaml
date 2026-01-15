@@ -2,7 +2,7 @@
 # Frame stacking + action history for temporal context
 
 dataset:
-  path: "./dataset/margit_100_256x144.zarr"
+  path: "./dataset/margit_100_256x144_v2.zarr"
   train_ratio: 0.8
   val_ratio: 0.2
   split_seed: 42
