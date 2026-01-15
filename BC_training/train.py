@@ -197,14 +197,25 @@ def create_train_state(
     elif is_temporal:
         # Temporal model initialization
         if state_shape is not None and use_anim_embeddings:
+            # Determine anim_idx shape based on state_shape
+            # If state_shape has 3 dims [B, T, features], anim_idx is [B, T]
+            # If state_shape has 2 dims [B, features], anim_idx is [B]
+            if len(state_shape) == 3:
+                # Stacked states: anim_idx is [B, T]
+                num_timesteps = state_shape[1]
+                anim_idx_shape = (batch_size, num_timesteps)
+            else:
+                # Single state: anim_idx is [B]
+                anim_idx_shape = (batch_size,)
+
             # Temporal with state + embeddings
             variables = model.init(
                 {'params': init_rng, 'dropout': dropout_rng},
                 jnp.ones(input_shape),                      # frames [B, T, C, H, W]
                 jnp.ones(action_history_shape),             # action_history [B, K, A]
                 jnp.ones(state_shape),                      # continuous state
-                jnp.zeros((batch_size,), dtype=jnp.int32),  # hero_anim_idx
-                jnp.zeros((batch_size,), dtype=jnp.int32),  # npc_anim_idx
+                jnp.zeros(anim_idx_shape, dtype=jnp.int32),  # hero_anim_idx
+                jnp.zeros(anim_idx_shape, dtype=jnp.int32),  # npc_anim_idx
                 training=False,
             )
         else:
@@ -1943,12 +1954,23 @@ def train(config_path: str):
         num_state_features = state_preprocessor.continuous_dim if use_state else 10
         anim_embed_dim = config.get('state_preprocessing', {}).get('anim_embed_dim', 16)
 
+        # Attention config
+        attention_config = config.get('attention', {})
+        use_frame_attention = attention_config.get('use_frame_attention', False)
+        use_state_attention = attention_config.get('use_state_attention', False)
+        use_cross_attention = attention_config.get('use_cross_attention', False)
+        attention_num_heads = attention_config.get('num_heads', 4)
+        attention_head_dim = attention_config.get('head_dim', 32)
+
         console.print(f"[cyan]Temporal config: {num_history_frames} history frames, {num_action_history} action history[/cyan]")
         if use_state:
             console.print(f"[cyan]Stack states: {stack_states}[/cyan]")
             console.print(f"[cyan]Continuous state features: {num_state_features}[/cyan]")
             console.print(f"[cyan]Hero anim vocab size: {state_preprocessor.hero_vocab_size}[/cyan]")
             console.print(f"[cyan]NPC anim vocab size: {state_preprocessor.npc_vocab_size}[/cyan]")
+        if use_frame_attention or use_state_attention or use_cross_attention:
+            console.print(f"[cyan]Attention: frames={use_frame_attention}, states={use_state_attention}, cross={use_cross_attention}[/cyan]")
+            console.print(f"[cyan]Attention config: heads={attention_num_heads}, head_dim={attention_head_dim}[/cyan]")
 
         model = create_model(
             num_actions=num_actions,
@@ -1968,6 +1990,11 @@ def train(config_path: str):
             action_history_features=config['model'].get('action_history_features', 64),
             dropout_rate=config['model']['dropout_rate'],
             use_batch_norm=config['model']['use_batch_norm'],
+            use_frame_attention=use_frame_attention,
+            use_state_attention=use_state_attention,
+            use_cross_attention=use_cross_attention,
+            attention_num_heads=attention_num_heads,
+            attention_head_dim=attention_head_dim,
         )
     elif model_name == 'gru':
         from models.gru import create_model

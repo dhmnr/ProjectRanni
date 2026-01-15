@@ -2,12 +2,17 @@
 
 This model processes a sequence of frames and past actions to predict the next action,
 providing temporal context that a single-frame model lacks.
+
+Supports optional attention mechanisms:
+- Temporal attention over frames
+- Temporal attention over states
+- Cross-attention between frames and states
 """
 
 import jax
 import jax.numpy as jnp
 import flax.linen as nn
-from typing import Tuple
+from typing import Tuple, Optional
 import logging
 
 logger = logging.getLogger(__name__)
@@ -165,6 +170,155 @@ class TemporalStateEncoder(nn.Module):
         return x
 
 
+class TemporalSelfAttention(nn.Module):
+    """Self-attention over temporal dimension.
+
+    Learns to weight different timesteps based on their relevance.
+    Includes learned positional embeddings for temporal order awareness.
+    """
+
+    num_heads: int = 4
+    head_dim: int = 32
+    dropout_rate: float = 0.0
+    max_seq_len: int = 16  # Maximum sequence length for positional embeddings
+
+    @nn.compact
+    def __call__(self, x, training: bool = True):
+        """Apply self-attention over temporal dimension.
+
+        Args:
+            x: [B, T, D] temporal features
+            training: Whether in training mode
+
+        Returns:
+            [B, T, D] attended features (same shape as input)
+        """
+        batch_size, num_timesteps, feat_dim = x.shape
+
+        # Learned positional embeddings
+        pos_embed = self.param(
+            'pos_embed',
+            nn.initializers.normal(stddev=0.02),
+            (self.max_seq_len, feat_dim)
+        )
+        x = x + pos_embed[:num_timesteps]  # Add positional info
+
+        # Multi-head attention
+        x_attended = nn.MultiHeadDotProductAttention(
+            num_heads=self.num_heads,
+            qkv_features=self.num_heads * self.head_dim,
+            dropout_rate=self.dropout_rate,
+            deterministic=not training,
+        )(x, x)  # Self-attention: query=key=value=x
+
+        # Residual connection
+        x = x + x_attended
+
+        # Layer norm
+        x = nn.LayerNorm()(x)
+
+        return x
+
+
+class TemporalAttentionPooling(nn.Module):
+    """Attention-based pooling over temporal dimension.
+
+    Instead of mean/concat, learns which timesteps to focus on.
+    Returns weighted combination of temporal features.
+    """
+
+    hidden_dim: int = 64
+
+    @nn.compact
+    def __call__(self, x, training: bool = True):
+        """Pool temporal features using attention.
+
+        Args:
+            x: [B, T, D] temporal features
+            training: Whether in training mode
+
+        Returns:
+            [B, D] pooled features
+        """
+        batch_size, num_timesteps, feat_dim = x.shape
+
+        # Compute attention scores for each timestep
+        # Project to scalar score per timestep
+        scores = nn.Dense(features=self.hidden_dim)(x)  # [B, T, hidden]
+        scores = nn.tanh(scores)
+        scores = nn.Dense(features=1)(scores)  # [B, T, 1]
+        scores = scores.squeeze(-1)  # [B, T]
+
+        # Softmax over timesteps
+        weights = nn.softmax(scores, axis=-1)  # [B, T]
+
+        # Weighted sum
+        weights = weights[:, :, None]  # [B, T, 1]
+        pooled = jnp.sum(x * weights, axis=1)  # [B, D]
+
+        return pooled
+
+
+class CrossAttention(nn.Module):
+    """Cross-attention between two feature sequences.
+
+    Used to let frames attend to states or vice versa.
+    Includes learned positional embeddings for both sequences.
+    """
+
+    num_heads: int = 4
+    head_dim: int = 32
+    dropout_rate: float = 0.0
+    max_seq_len: int = 16  # Maximum sequence length for positional embeddings
+
+    @nn.compact
+    def __call__(self, query, key_value, training: bool = True):
+        """Apply cross-attention.
+
+        Args:
+            query: [B, T1, D1] query features
+            key_value: [B, T2, D2] key/value features
+            training: Whether in training mode
+
+        Returns:
+            [B, T1, D1] attended features (same shape as query)
+        """
+        batch_size, num_q_timesteps, q_feat_dim = query.shape
+        _, num_kv_timesteps, kv_feat_dim = key_value.shape
+
+        # Learned positional embeddings for query and key_value
+        query_pos_embed = self.param(
+            'query_pos_embed',
+            nn.initializers.normal(stddev=0.02),
+            (self.max_seq_len, q_feat_dim)
+        )
+        kv_pos_embed = self.param(
+            'kv_pos_embed',
+            nn.initializers.normal(stddev=0.02),
+            (self.max_seq_len, kv_feat_dim)
+        )
+        query = query + query_pos_embed[:num_q_timesteps]
+        key_value = key_value + kv_pos_embed[:num_kv_timesteps]
+
+        # Cross-attention: query attends to key_value
+        x_attended = nn.MultiHeadDotProductAttention(
+            num_heads=self.num_heads,
+            qkv_features=self.num_heads * self.head_dim,
+            dropout_rate=self.dropout_rate,
+            deterministic=not training,
+        )(query, key_value)
+
+        # Residual connection (project if dimensions differ)
+        if query.shape[-1] != x_attended.shape[-1]:
+            query = nn.Dense(features=x_attended.shape[-1])(query)
+        x = query + x_attended
+
+        # Layer norm
+        x = nn.LayerNorm()(x)
+
+        return x
+
+
 class TemporalCNN(nn.Module):
     """Temporal CNN with frame stacking and action history.
 
@@ -202,6 +356,13 @@ class TemporalCNN(nn.Module):
     action_history_features: int = 64  # Hidden dim for action history encoding
     dropout_rate: float = 0.0
     use_batch_norm: bool = True
+
+    # Attention options
+    use_frame_attention: bool = False  # Self-attention over frame features
+    use_state_attention: bool = False  # Self-attention over state features (requires stack_states)
+    use_cross_attention: bool = False  # Cross-attention between frames and states
+    attention_num_heads: int = 4
+    attention_head_dim: int = 32
     
     @nn.compact
     def __call__(
@@ -230,14 +391,17 @@ class TemporalCNN(nn.Module):
         num_frames = frames.shape[1]
         
         # === Process frames ===
-        if self.frame_mode == 'channel_stack':
-            # Stack all frames along channel dimension
+        # Track temporal frame features for potential attention/cross-attention
+        frame_features_temporal = None  # [B, T, D] if needed
+
+        if self.frame_mode == 'channel_stack' and not self.use_frame_attention:
+            # Stack all frames along channel dimension (no attention possible)
             # [B, T, C, H, W] -> [B, H, W, T*C]
             frames_hwc = jnp.transpose(frames, (0, 3, 4, 1, 2))  # [B, H, W, T, C]
             frames_hwc = frames_hwc.reshape(
                 batch_size, frames_hwc.shape[1], frames_hwc.shape[2], -1
             )  # [B, H, W, T*C]
-            
+
             # Single CNN on stacked channels
             x_vision = frames_hwc
             for i, features in enumerate(self.conv_features):
@@ -248,16 +412,16 @@ class TemporalCNN(nn.Module):
                     strides=stride,
                     use_batch_norm=self.use_batch_norm,
                 )(x_vision, training=training)
-            
+
             x_vision = jnp.mean(x_vision, axis=(1, 2))  # [B, feat_dim]
-            
-        else:  # shared_encoder
-            # Process each frame with shared CNN, then concat
+
+        else:  # shared_encoder or frame_attention enabled
+            # Process each frame with shared CNN
             frame_encoder = FrameEncoder(
                 conv_features=self.conv_features,
                 use_batch_norm=self.use_batch_norm,
             )
-            
+
             # Process each timestep
             frame_features = []
             for t in range(num_frames):
@@ -265,9 +429,25 @@ class TemporalCNN(nn.Module):
                 frame_t = jnp.transpose(frames[:, t], (0, 2, 3, 1))
                 feat_t = frame_encoder(frame_t, training=training)
                 frame_features.append(feat_t)
-            
-            # Concat all frame features: [B, T * feat_dim]
-            x_vision = jnp.concatenate(frame_features, axis=-1)
+
+            # Stack as temporal sequence: [B, T, feat_dim]
+            frame_features_temporal = jnp.stack(frame_features, axis=1)
+
+            if self.use_frame_attention:
+                # Apply self-attention over frame features
+                frame_features_temporal = TemporalSelfAttention(
+                    num_heads=self.attention_num_heads,
+                    head_dim=self.attention_head_dim,
+                    dropout_rate=self.dropout_rate,
+                )(frame_features_temporal, training=training)
+
+                # Attention pooling over time
+                x_vision = TemporalAttentionPooling(
+                    hidden_dim=self.conv_features[-1],
+                )(frame_features_temporal, training=training)
+            else:
+                # Concat all frame features: [B, T * feat_dim]
+                x_vision = frame_features_temporal.reshape(batch_size, -1)
         
         # === Combine features ===
         features_to_concat = [x_vision]
@@ -285,19 +465,59 @@ class TemporalCNN(nn.Module):
             features_to_concat.append(x_actions)
         
         # === Optional: State features ===
+        state_features_temporal = None  # [B, T, D] if needed for cross-attention
+
         if self.use_state and state is not None:
             if self.stack_states:
-                # Temporal state encoding: state [B, T, S], anim_ids [B, T]
-                x_state = TemporalStateEncoder(
-                    hidden_features=self.state_encoder_features,
-                    output_features=self.state_output_features,
-                    anim_embed_dim=self.anim_embed_dim,
-                    hero_anim_vocab_size=self.hero_anim_vocab_size,
-                    npc_anim_vocab_size=self.npc_anim_vocab_size,
-                    dropout_rate=self.dropout_rate,
-                    use_batch_norm=self.use_batch_norm,
-                )(state, hero_anim_idx, npc_anim_idx, training=training)
+                # Build temporal state features: [B, T, D]
+                # First embed animations and concat with state
+                hero_embed = nn.Embed(
+                    num_embeddings=self.hero_anim_vocab_size,
+                    features=self.anim_embed_dim,
+                    name='hero_anim_embed',
+                )(hero_anim_idx)  # [B, T, embed_dim]
+
+                npc_embed = nn.Embed(
+                    num_embeddings=self.npc_anim_vocab_size,
+                    features=self.anim_embed_dim,
+                    name='npc_anim_embed',
+                )(npc_anim_idx)  # [B, T, embed_dim]
+
+                # Concat state + embeddings: [B, T, state_features + 2*embed_dim]
+                state_with_embeds = jnp.concatenate([state, hero_embed, npc_embed], axis=-1)
+
+                # Encode each timestep with shared MLP
+                state_features_temporal = state_with_embeds
+                for features in self.state_encoder_features:
+                    state_features_temporal = nn.Dense(features=features)(state_features_temporal)
+                    if self.use_batch_norm:
+                        # Reshape for BatchNorm
+                        orig_shape = state_features_temporal.shape
+                        state_features_temporal = state_features_temporal.reshape(-1, features)
+                        state_features_temporal = nn.BatchNorm(use_running_average=not training)(state_features_temporal)
+                        state_features_temporal = state_features_temporal.reshape(orig_shape)
+                    state_features_temporal = nn.relu(state_features_temporal)
+
+                # Apply state attention if enabled
+                if self.use_state_attention:
+                    state_features_temporal = TemporalSelfAttention(
+                        num_heads=self.attention_num_heads,
+                        head_dim=self.attention_head_dim,
+                        dropout_rate=self.dropout_rate,
+                    )(state_features_temporal, training=training)
+
+                    # Attention pooling
+                    x_state = TemporalAttentionPooling(
+                        hidden_dim=self.state_encoder_features[-1],
+                    )(state_features_temporal, training=training)
+                else:
+                    # Flatten temporal: [B, T * D]
+                    x_state = state_features_temporal.reshape(batch_size, -1)
+                    x_state = nn.Dense(features=self.state_output_features)(x_state)
+                    x_state = nn.relu(x_state)
+
                 features_to_concat.append(x_state)
+
             else:
                 # Single state encoding: state [B, S], anim_ids [B]
                 x_state = StateEncoder(
@@ -323,6 +543,22 @@ class TemporalCNN(nn.Module):
                     )(npc_anim_idx)
 
                     features_to_concat.extend([hero_embed, npc_embed])
+
+        # === Cross-attention between frames and states ===
+        if self.use_cross_attention and frame_features_temporal is not None and state_features_temporal is not None:
+            # Frames attend to states
+            frame_attended = CrossAttention(
+                num_heads=self.attention_num_heads,
+                head_dim=self.attention_head_dim,
+                dropout_rate=self.dropout_rate,
+            )(frame_features_temporal, state_features_temporal, training=training)
+
+            # Pool attended features
+            x_cross = TemporalAttentionPooling(
+                hidden_dim=self.conv_features[-1],
+            )(frame_attended, training=training)
+
+            features_to_concat.append(x_cross)
         
         # === Fusion and prediction ===
         x = jnp.concatenate(features_to_concat, axis=-1)
@@ -360,6 +596,11 @@ def create_model(
     action_history_features: int = 64,
     dropout_rate: float = 0.0,
     use_batch_norm: bool = True,
+    use_frame_attention: bool = False,
+    use_state_attention: bool = False,
+    use_cross_attention: bool = False,
+    attention_num_heads: int = 4,
+    attention_head_dim: int = 32,
 ) -> TemporalCNN:
     """Factory function to create TemporalCNN model.
 
@@ -381,6 +622,11 @@ def create_model(
         action_history_features: Action history encoder dim
         dropout_rate: Dropout rate
         use_batch_norm: Whether to use batch norm
+        use_frame_attention: Self-attention over frame features
+        use_state_attention: Self-attention over state features
+        use_cross_attention: Cross-attention between frames and states
+        attention_num_heads: Number of attention heads
+        attention_head_dim: Dimension per attention head
 
     Returns:
         TemporalCNN model instance
@@ -403,6 +649,11 @@ def create_model(
         action_history_features=action_history_features,
         dropout_rate=dropout_rate,
         use_batch_norm=use_batch_norm,
+        use_frame_attention=use_frame_attention,
+        use_state_attention=use_state_attention,
+        use_cross_attention=use_cross_attention,
+        attention_num_heads=attention_num_heads,
+        attention_head_dim=attention_head_dim,
     )
 
     total_frames = num_history_frames + 1
@@ -420,6 +671,9 @@ def create_model(
     logger.info(f"  Action history features: {action_history_features}")
     logger.info(f"  Dropout: {dropout_rate}")
     logger.info(f"  Batch norm: {use_batch_norm}")
+    if use_frame_attention or use_state_attention or use_cross_attention:
+        logger.info(f"  Attention: frame={use_frame_attention}, state={use_state_attention}, cross={use_cross_attention}")
+        logger.info(f"  Attention heads: {attention_num_heads}, head_dim: {attention_head_dim}")
 
     return model
 

@@ -50,6 +50,15 @@ model:
   dropout_rate: 0.3
   use_batch_norm: true
 
+# Attention mechanisms (optional)
+# Requires: stack_states=true for state attention, shared_encoder mode for frame attention
+attention:
+  use_frame_attention: true   # Self-attention over temporal frame features
+  use_state_attention: true   # Self-attention over temporal state features
+  use_cross_attention: true   # Cross-attention between frames and states
+  num_heads: 4                 # Number of attention heads
+  head_dim: 32                 # Dimension per attention head
+
 training:
   batch_size: 32
   num_epochs: 10
