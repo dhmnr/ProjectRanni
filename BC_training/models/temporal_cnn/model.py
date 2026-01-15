@@ -70,16 +70,16 @@ class FrameEncoder(nn.Module):
 
 class StateEncoder(nn.Module):
     """MLP encoder for continuous state features."""
-    
+
     hidden_features: Tuple[int, ...] = (64, 64)
     output_features: int = 64
     dropout_rate: float = 0.0
     use_batch_norm: bool = True
-    
+
     @nn.compact
     def __call__(self, state, training: bool = True):
         x = state
-        
+
         for features in self.hidden_features:
             x = nn.Dense(features=features)(x)
             if self.use_batch_norm:
@@ -87,40 +87,112 @@ class StateEncoder(nn.Module):
             x = nn.relu(x)
             if self.dropout_rate > 0:
                 x = nn.Dropout(rate=self.dropout_rate, deterministic=not training)(x)
-        
+
         x = nn.Dense(features=self.output_features)(x)
         x = nn.relu(x)
-        
+
+        return x
+
+
+class TemporalStateEncoder(nn.Module):
+    """Encoder for temporally stacked states.
+
+    Processes each timestep with shared MLP, then aggregates temporal info.
+    """
+
+    hidden_features: Tuple[int, ...] = (64, 64)
+    output_features: int = 64
+    anim_embed_dim: int = 16
+    hero_anim_vocab_size: int = 67
+    npc_anim_vocab_size: int = 54
+    dropout_rate: float = 0.0
+    use_batch_norm: bool = True
+
+    @nn.compact
+    def __call__(
+        self,
+        states,
+        hero_anim_ids,
+        npc_anim_ids,
+        training: bool = True,
+    ):
+        """Encode temporal state sequence.
+
+        Args:
+            states: [B, T, num_features] stacked states
+            hero_anim_ids: [B, T] hero animation indices
+            npc_anim_ids: [B, T] NPC animation indices
+            training: Whether in training mode
+
+        Returns:
+            [B, output_dim] encoded temporal state
+        """
+        batch_size, num_timesteps, num_features = states.shape
+
+        # Animation embeddings
+        hero_embed = nn.Embed(
+            num_embeddings=self.hero_anim_vocab_size,
+            features=self.anim_embed_dim,
+            name='hero_anim_embed',
+        )(hero_anim_ids)  # [B, T, embed_dim]
+
+        npc_embed = nn.Embed(
+            num_embeddings=self.npc_anim_vocab_size,
+            features=self.anim_embed_dim,
+            name='npc_anim_embed',
+        )(npc_anim_ids)  # [B, T, embed_dim]
+
+        # Concatenate state + embeddings at each timestep
+        x = jnp.concatenate([states, hero_embed, npc_embed], axis=-1)  # [B, T, features+2*embed]
+
+        # Process each timestep with shared MLP
+        for features in self.hidden_features:
+            x = nn.Dense(features=features)(x)
+            if self.use_batch_norm:
+                # Reshape for BatchNorm: [B*T, features]
+                x_flat = x.reshape(-1, features)
+                x_flat = nn.BatchNorm(use_running_average=not training)(x_flat)
+                x = x_flat.reshape(batch_size, num_timesteps, features)
+            x = nn.relu(x)
+            if self.dropout_rate > 0:
+                x = nn.Dropout(rate=self.dropout_rate, deterministic=not training)(x)
+
+        # Flatten temporal dimension and project to output
+        x = x.reshape(batch_size, -1)  # [B, T * hidden_features[-1]]
+        x = nn.Dense(features=self.output_features)(x)
+        x = nn.relu(x)
+
         return x
 
 
 class TemporalCNN(nn.Module):
     """Temporal CNN with frame stacking and action history.
-    
+
     Architecture:
         Frames [B, T, C, H, W] -> SharedCNN per frame -> [B, T, F]
         Action History [B, K, A] -> Flatten -> [B, K*A]
-        (Optional) State [B, S] -> MLP -> [B, F2]
-        (Optional) Anim embeds [B] -> Embed -> [B, E]
+        (Optional) State [B, S] or [B, T, S] -> MLP -> [B, F2]
+        (Optional) Anim embeds [B] or [B, T] -> Embed -> [B, E]
         Concat all temporal features -> Dense -> actions [B, A]
-    
+
     Options for frame processing:
         1. Channel stacking: Concat frames along channel dim before CNN
         2. Shared encoder: Process each frame independently, concat features
         3. 3D Conv: Use 3D convolutions (not implemented)
     """
-    
+
     num_actions: int
     num_history_frames: int  # Number of past frames (not including current)
     num_action_history: int  # Number of past actions
-    
+
     # Optional state features
     use_state: bool = False
+    stack_states: bool = False  # Whether states are temporally stacked [B, T, S]
     num_state_features: int = 10
     hero_anim_vocab_size: int = 67
     npc_anim_vocab_size: int = 54
     anim_embed_dim: int = 16
-    
+
     # Architecture
     frame_mode: str = 'channel_stack'  # 'channel_stack' or 'shared_encoder'
     conv_features: Tuple[int, ...] = (32, 64, 128, 256)
@@ -214,29 +286,43 @@ class TemporalCNN(nn.Module):
         
         # === Optional: State features ===
         if self.use_state and state is not None:
-            x_state = StateEncoder(
-                hidden_features=self.state_encoder_features,
-                output_features=self.state_output_features,
-                dropout_rate=self.dropout_rate,
-                use_batch_norm=self.use_batch_norm,
-            )(state, training=training)
-            features_to_concat.append(x_state)
-            
-            # Animation embeddings
-            if hero_anim_idx is not None and npc_anim_idx is not None:
-                hero_embed = nn.Embed(
-                    num_embeddings=self.hero_anim_vocab_size,
-                    features=self.anim_embed_dim,
-                    name='hero_anim_embed',
-                )(hero_anim_idx)
-                
-                npc_embed = nn.Embed(
-                    num_embeddings=self.npc_anim_vocab_size,
-                    features=self.anim_embed_dim,
-                    name='npc_anim_embed',
-                )(npc_anim_idx)
-                
-                features_to_concat.extend([hero_embed, npc_embed])
+            if self.stack_states:
+                # Temporal state encoding: state [B, T, S], anim_ids [B, T]
+                x_state = TemporalStateEncoder(
+                    hidden_features=self.state_encoder_features,
+                    output_features=self.state_output_features,
+                    anim_embed_dim=self.anim_embed_dim,
+                    hero_anim_vocab_size=self.hero_anim_vocab_size,
+                    npc_anim_vocab_size=self.npc_anim_vocab_size,
+                    dropout_rate=self.dropout_rate,
+                    use_batch_norm=self.use_batch_norm,
+                )(state, hero_anim_idx, npc_anim_idx, training=training)
+                features_to_concat.append(x_state)
+            else:
+                # Single state encoding: state [B, S], anim_ids [B]
+                x_state = StateEncoder(
+                    hidden_features=self.state_encoder_features,
+                    output_features=self.state_output_features,
+                    dropout_rate=self.dropout_rate,
+                    use_batch_norm=self.use_batch_norm,
+                )(state, training=training)
+                features_to_concat.append(x_state)
+
+                # Animation embeddings (only for non-stacked mode)
+                if hero_anim_idx is not None and npc_anim_idx is not None:
+                    hero_embed = nn.Embed(
+                        num_embeddings=self.hero_anim_vocab_size,
+                        features=self.anim_embed_dim,
+                        name='hero_anim_embed',
+                    )(hero_anim_idx)
+
+                    npc_embed = nn.Embed(
+                        num_embeddings=self.npc_anim_vocab_size,
+                        features=self.anim_embed_dim,
+                        name='npc_anim_embed',
+                    )(npc_anim_idx)
+
+                    features_to_concat.extend([hero_embed, npc_embed])
         
         # === Fusion and prediction ===
         x = jnp.concatenate(features_to_concat, axis=-1)
@@ -261,6 +347,7 @@ def create_model(
     num_history_frames: int = 4,
     num_action_history: int = 4,
     use_state: bool = False,
+    stack_states: bool = False,
     num_state_features: int = 10,
     hero_anim_vocab_size: int = 67,
     npc_anim_vocab_size: int = 54,
@@ -275,12 +362,13 @@ def create_model(
     use_batch_norm: bool = True,
 ) -> TemporalCNN:
     """Factory function to create TemporalCNN model.
-    
+
     Args:
         num_actions: Number of action outputs
         num_history_frames: Number of past frames
         num_action_history: Number of past actions
         use_state: Whether to use state features
+        stack_states: Whether to stack states temporally (same as frames)
         num_state_features: Number of continuous state features
         hero_anim_vocab_size: Size of hero animation embedding
         npc_anim_vocab_size: Size of NPC animation embedding
@@ -293,7 +381,7 @@ def create_model(
         action_history_features: Action history encoder dim
         dropout_rate: Dropout rate
         use_batch_norm: Whether to use batch norm
-        
+
     Returns:
         TemporalCNN model instance
     """
@@ -302,6 +390,7 @@ def create_model(
         num_history_frames=num_history_frames,
         num_action_history=num_action_history,
         use_state=use_state,
+        stack_states=stack_states,
         num_state_features=num_state_features,
         hero_anim_vocab_size=hero_anim_vocab_size,
         npc_anim_vocab_size=npc_anim_vocab_size,
@@ -315,7 +404,7 @@ def create_model(
         dropout_rate=dropout_rate,
         use_batch_norm=use_batch_norm,
     )
-    
+
     total_frames = num_history_frames + 1
     logger.info(f"Created TemporalCNN model:")
     logger.info(f"  Frame mode: {frame_mode}")
@@ -325,12 +414,13 @@ def create_model(
     logger.info(f"  Dense features: {dense_features}")
     logger.info(f"  Use state: {use_state}")
     if use_state:
+        logger.info(f"  Stack states: {stack_states}")
         logger.info(f"  State features: {num_state_features}")
         logger.info(f"  Anim embeds: hero={hero_anim_vocab_size}, npc={npc_anim_vocab_size}, dim={anim_embed_dim}")
     logger.info(f"  Action history features: {action_history_features}")
     logger.info(f"  Dropout: {dropout_rate}")
     logger.info(f"  Batch norm: {use_batch_norm}")
-    
+
     return model
 
 

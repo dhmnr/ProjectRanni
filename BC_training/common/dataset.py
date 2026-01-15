@@ -340,6 +340,7 @@ class TemporalGameplayDataset:
         frame_skip: int = 1,
         oversample_actions: Optional[List[int]] = None,
         oversample_ratio: float = 1.0,
+        stack_states: bool = False,
     ):
         """Initialize temporal dataset.
 
@@ -356,6 +357,7 @@ class TemporalGameplayDataset:
             oversample_actions: List of action indices to oversample (e.g., [4, 8] for dodge/attack)
             oversample_ratio: How much to oversample (e.g., 2.0 = double rare samples,
                               or target ratio to match majority class frequency)
+            stack_states: Whether to stack states temporally (same as frames) instead of single state
         """
         self.dataset_path = Path(dataset_path)
         self.use_state = use_state
@@ -366,6 +368,7 @@ class TemporalGameplayDataset:
         self.frame_skip = frame_skip
         self.oversample_actions = oversample_actions
         self.oversample_ratio = oversample_ratio
+        self.stack_states = stack_states
 
         # Total lookback needed
         self.lookback = max(
@@ -597,15 +600,32 @@ class TemporalGameplayDataset:
             'actions': actions,  # [num_actions]
             'action_history': action_history,  # [K, num_actions]
         }
-        
+
         # === Optionally load state ===
         if self.use_state:
-            state = np.array(ep['state'][frame_idx], dtype=np.float32)
-            processed = self.state_preprocessor(state)
-            result['state'] = processed['continuous']
-            result['hero_anim_idx'] = processed['hero_anim_idx']
-            result['npc_anim_idx'] = processed['npc_anim_idx']
-        
+            if self.stack_states:
+                # Stack states temporally (same indices as frames)
+                states = []
+                hero_anim_ids = []
+                npc_anim_ids = []
+                for fi in frame_indices:
+                    state = np.array(ep['state'][fi], dtype=np.float32)
+                    processed = self.state_preprocessor(state)
+                    states.append(processed['continuous'])
+                    hero_anim_ids.append(processed['hero_anim_idx'])
+                    npc_anim_ids.append(processed['npc_anim_idx'])
+
+                result['state'] = np.stack(states, axis=0)  # [T, num_features]
+                result['hero_anim_idx'] = np.array(hero_anim_ids, dtype=np.int32)  # [T]
+                result['npc_anim_idx'] = np.array(npc_anim_ids, dtype=np.int32)  # [T]
+            else:
+                # Single state (current frame only)
+                state = np.array(ep['state'][frame_idx], dtype=np.float32)
+                processed = self.state_preprocessor(state)
+                result['state'] = processed['continuous']
+                result['hero_anim_idx'] = processed['hero_anim_idx']
+                result['npc_anim_idx'] = processed['npc_anim_idx']
+
         return result
 
 

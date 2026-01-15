@@ -2,7 +2,7 @@
 # Frame stacking + action history for temporal context
 
 dataset:
-  path: "./dataset/margit_100_256x144_v2.zarr"
+  path: "./dataset/margit_100_256x144.zarr"
   train_ratio: 0.8
   val_ratio: 0.2
   split_seed: 42
@@ -20,6 +20,7 @@ temporal:
   num_history_frames: 8   # Include 8 past frames (total 9 frames including current)
   num_action_history: 0   # Include 4 past actions
   frame_skip: 1           # Every frame (1 = no skip, 2 = every other frame)
+  stack_states: true      # Stack states temporally (same as frames) instead of single current state
 
 # State preprocessing (same as hybrid_state)
 state_preprocessing:

@@ -1820,6 +1820,9 @@ def train(config_path: str):
                     action_names = [action_keys[i] for i in oversample_actions]
                     console.print(f"[cyan]Oversampling actions: {action_names} (indices: {oversample_actions}) with ratio {oversample_ratio}[/cyan]")
 
+        # Check if states should be stacked temporally
+        stack_states = config.get('temporal', {}).get('stack_states', False)
+
         train_dataset = TemporalGameplayDataset(
             dataset_path=dataset_path,
             episode_indices=train_indices,
@@ -1832,6 +1835,7 @@ def train(config_path: str):
             frame_skip=frame_skip,
             oversample_actions=oversample_actions,
             oversample_ratio=oversample_ratio,
+            stack_states=stack_states,
         )
 
         # No oversampling for validation set
@@ -1845,6 +1849,7 @@ def train(config_path: str):
             num_history_frames=num_history_frames,
             num_action_history=num_action_history,
             frame_skip=frame_skip,
+            stack_states=stack_states,
         )
     else:
         # Standard single-frame dataset
@@ -1927,27 +1932,30 @@ def train(config_path: str):
         )
     elif model_name == 'temporal_cnn':
         from models.temporal_cnn import create_model
-        
+
         # Get temporal config
         temporal_config = config.get('temporal', {})
         num_history_frames = temporal_config.get('num_history_frames', 4)
         num_action_history = temporal_config.get('num_action_history', 4)
-        
+        stack_states = temporal_config.get('stack_states', False)
+
         # State features (optional)
         num_state_features = state_preprocessor.continuous_dim if use_state else 10
         anim_embed_dim = config.get('state_preprocessing', {}).get('anim_embed_dim', 16)
-        
+
         console.print(f"[cyan]Temporal config: {num_history_frames} history frames, {num_action_history} action history[/cyan]")
         if use_state:
+            console.print(f"[cyan]Stack states: {stack_states}[/cyan]")
             console.print(f"[cyan]Continuous state features: {num_state_features}[/cyan]")
             console.print(f"[cyan]Hero anim vocab size: {state_preprocessor.hero_vocab_size}[/cyan]")
             console.print(f"[cyan]NPC anim vocab size: {state_preprocessor.npc_vocab_size}[/cyan]")
-        
+
         model = create_model(
             num_actions=num_actions,
             num_history_frames=num_history_frames,
             num_action_history=num_action_history,
             use_state=use_state,
+            stack_states=stack_states,
             num_state_features=num_state_features,
             hero_anim_vocab_size=state_preprocessor.hero_vocab_size if use_state else 67,
             npc_anim_vocab_size=state_preprocessor.npc_vocab_size if use_state else 54,
