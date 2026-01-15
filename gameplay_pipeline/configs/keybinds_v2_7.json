@@ -1,0 +1,36 @@
+{
+    "actions": {
+        "move_left": {
+            "index": 0,
+            "key": "A"
+        },
+        "lock_on": {
+            "index": 1,
+            "key": "B"
+        },
+        "dodge_roll/dash": {
+            "index": 2,
+            "key": "LEFT_SHIFT",
+            "mouse": "BUTTON5"
+        },
+        "move_right": {
+            "index": 3,
+            "key": "D"
+        },
+        "attack": {
+            "index": 4,
+            "key": "P",
+            "mouse": "LEFT"
+        },
+        "move_back": {
+            "index": 5,
+            "key": "S"
+        },
+        "move_forward": {
+            "index": 6,
+            "key": "W"
+        }
+    },
+    "description": "7-action keybinds matching margit_100_256x144.zarr dataset. Order matches zarr keys attribute.",
+    "version": "2.0"
+}
