@@ -26,7 +26,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent / "BC_training"))
 
 from ..model_loader import LoadedModel
 from BC_training.common.state_preprocessing import STATE_INDICES
-from BC_eval.agents.base import BaseAgent, build_action_mapping, DEFAULT_TRAINING_ACTIONS
+from BC_eval.agents.base import BaseAgent, build_action_mapping, load_training_actions_from_keybinds
 
 logger = logging.getLogger(__name__)
 
@@ -54,7 +54,7 @@ class TemporalAgent(BaseAgent):
         frame_shape: tuple = (3, 144, 256),  # C, H, W expected by model
         env_action_keys: Optional[List[str]] = None,
         env_keybinds: Optional[Dict[str, str]] = None,
-        training_actions: Optional[List[str]] = None,
+        training_keybinds_path: Optional[str] = None,
     ):
         """Initialize temporal agent.
 
@@ -64,7 +64,7 @@ class TemporalAgent(BaseAgent):
             frame_shape: Expected frame shape (C, H, W) for the model
             env_action_keys: List of raw key names from environment
             env_keybinds: Dict mapping key names to semantic actions
-            training_actions: List of semantic action names from training data
+            training_keybinds_path: Path to keybinds JSON used during training (e.g., keybinds_v2_7.json)
         """
         # Don't call super().__init__ to avoid the is_temporal check
         self.model = model
@@ -85,10 +85,15 @@ class TemporalAgent(BaseAgent):
         # Setup action mapping from model outputs to env actions
         self.action_mapping = None
         self.env_num_actions = None
+        self.training_actions = None
         if env_action_keys is not None and env_keybinds is not None:
-            training_actions = training_actions or DEFAULT_TRAINING_ACTIONS
+            if training_keybinds_path:
+                self.training_actions = load_training_actions_from_keybinds(training_keybinds_path)
+                logger.info(f"Loaded {len(self.training_actions)} training actions from {training_keybinds_path}")
+            else:
+                raise ValueError("training_keybinds_path is required for action mapping")
             self.action_mapping = build_action_mapping(
-                env_action_keys, env_keybinds, training_actions
+                env_action_keys, env_keybinds, self.training_actions
             )
             self.env_num_actions = len(env_action_keys)
             logger.info(f"Action mapping: {self.action_mapping}")
@@ -180,6 +185,10 @@ class TemporalAgent(BaseAgent):
         Returns:
             Action history [1, K, num_actions] where K = num_action_history
         """
+        # Handle edge case where num_action_history is 0
+        if self.num_action_history == 0:
+            return jnp.zeros((1, 0, self.num_actions), dtype=jnp.float32)
+
         # Stack actions: list of [num_actions] -> [K, num_actions]
         history = np.stack(list(self.action_buffer), axis=0)
         # Add batch dimension

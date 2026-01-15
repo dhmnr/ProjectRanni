@@ -11,6 +11,7 @@ Preprocessing to match BC training:
 3. Actions: Maps model's semantic actions to environment's raw key actions
 """
 
+import json
 import sys
 from pathlib import Path
 import numpy as np
@@ -26,26 +27,28 @@ from BC_training.common.state_preprocessing import STATE_INDICES
 
 logger = logging.getLogger(__name__)
 
-# Default training action names (from zarr dataset)
-# Order must match the training data exactly
-DEFAULT_TRAINING_ACTIONS = [
-    'move_forward',
-    'move_back',
-    'move_left',
-    'move_right',
-    'dodge_roll/dash',
-    'jump',
-    'crouch/standup',
-    'lock_on',
-    'attack',
-    'strong_attack',
-    'skill',
-    'use_item',
-    'event_action',
-]
-
 # Actions to ignore (gym handles these automatically)
 DISABLED_ACTIONS = {'lock_on'}
+
+
+def load_training_actions_from_keybinds(keybinds_path: str) -> List[str]:
+    """Load training action names from keybinds JSON file.
+
+    Args:
+        keybinds_path: Path to keybinds JSON file (e.g., keybinds_v2_7.json)
+
+    Returns:
+        List of action names ordered by their index
+    """
+    with open(keybinds_path) as f:
+        keybinds = json.load(f)
+
+    # Build list ordered by index
+    actions = keybinds.get("actions", {})
+    indexed_actions = [(info["index"], name) for name, info in actions.items()]
+    indexed_actions.sort(key=lambda x: x[0])
+
+    return [name for _, name in indexed_actions]
 
 
 def build_action_mapping(
@@ -114,7 +117,7 @@ class BaseAgent:
         frame_shape: tuple = (3, 144, 256),  # C, H, W expected by model
         env_action_keys: Optional[List[str]] = None,
         env_keybinds: Optional[Dict[str, str]] = None,
-        training_actions: Optional[List[str]] = None,
+        training_keybinds_path: Optional[str] = None,
     ):
         """Initialize base agent.
 
@@ -124,7 +127,7 @@ class BaseAgent:
             frame_shape: Expected frame shape (C, H, W) for the model
             env_action_keys: List of raw key names from environment
             env_keybinds: Dict mapping key names to semantic actions
-            training_actions: List of semantic action names from training data
+            training_keybinds_path: Path to keybinds JSON used during training (e.g., keybinds_v2_7.json)
         """
         self.model = model
         self.action_threshold = action_threshold
@@ -144,10 +147,15 @@ class BaseAgent:
         # Setup action mapping from model outputs to env actions
         self.action_mapping = None
         self.env_num_actions = None
+        self.training_actions = None
         if env_action_keys is not None and env_keybinds is not None:
-            training_actions = training_actions or DEFAULT_TRAINING_ACTIONS
+            if training_keybinds_path:
+                self.training_actions = load_training_actions_from_keybinds(training_keybinds_path)
+                logger.info(f"Loaded {len(self.training_actions)} training actions from {training_keybinds_path}")
+            else:
+                raise ValueError("training_keybinds_path is required for action mapping")
             self.action_mapping = build_action_mapping(
-                env_action_keys, env_keybinds, training_actions
+                env_action_keys, env_keybinds, self.training_actions
             )
             self.env_num_actions = len(env_action_keys)
             logger.info(f"Action mapping: {self.action_mapping}")
