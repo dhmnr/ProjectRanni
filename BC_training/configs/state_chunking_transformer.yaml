@@ -1,0 +1,82 @@
+# State Chunking Transformer Configuration
+# STATE-ONLY model with temporal stacking - predicts binary actions via sigmoid
+# No vision/frames - uses only state features (HP, stamina, distances, animations)
+
+dataset:
+  path: "./dataset/margit_100_256x144_v2.zarr"
+  train_ratio: 0.8
+  val_ratio: 0.2
+  split_seed: 42
+  normalize_frames: true   # Still needed for dataset loading
+  validate_episodes: true
+
+# State preprocessing (always enabled for this model)
+state_preprocessing:
+  normalize_resources: true
+  compute_distances: true
+  anim_embed_dim: 16
+
+# Temporal state chunking settings
+state_chunking:
+  num_states: 8      # Number of temporal state observations (context)
+  chunk_size: 8      # Number of future actions to predict
+
+model:
+  name: state_chunking_transformer
+
+  # Transformer configuration
+  d_model: 512              # Model dimension
+  num_heads: 8              # Number of attention heads (64 dims per head)
+  num_encoder_layers: 4     # Number of encoder transformer blocks
+  num_decoder_layers: 4     # Number of decoder transformer blocks
+  d_ff: 2048                # Feed-forward hidden dimension
+
+  dropout_rate: 0.1
+
+  # State encoder configuration (required for this model)
+  state_encoder_features: [64, 64]  # Hidden layers for state MLP
+  state_output_features: 64          # State encoder output dimension
+
+training:
+  batch_size: 32            # Adjust based on GPU memory
+  num_epochs: 10
+  learning_rate: 0.0001     # 1e-4
+  weight_decay: 0.00001     # 1e-5 light L2 regularization
+  use_class_weights: true   # Weight actions by frequency
+  lr_schedule:
+    type: reduce_on_plateau
+    factor: 0.5             # Halve LR
+    patience: 5             # 5 epochs
+    min_lr: 0.000001        # 1e-6
+  grad_clip_norm: 1.0
+  checkpoint_dir: "./checkpoints/state_chunking_transformer"
+  save_every_n_epochs: 10
+  keep_last_n_checkpoints: 3
+
+  # Loss function - BCE with optional focal loss
+  loss:
+    type: binary_crossentropy  # or 'focal'
+    focal_gamma: 2.0           # Only used if type is 'focal'
+    onset_weight: 2.0          # Weight for action onsets (0->1 transitions)
+
+  # Early stopping
+  early_stopping:
+    enabled: true
+    patience: 10            # Stop if no improvement for 10 epochs
+    monitor: val_loss
+
+evaluation:
+  eval_every_n_epochs: 1
+
+logging:
+  use_wandb: true
+  wandb_project: "ProjectRanni-BC"
+  wandb_entity: "dhmnr-projects"
+  wandb_run_name: "state_chunk_d512_h8_enc4_dec4"
+  log_every_n_steps: 50
+  log_gradients: false
+
+system:
+  seed: 42
+  num_workers: 4
+  pin_memory: false
