@@ -2,7 +2,7 @@
 import time
 import eldengym
 
-env = eldengym.make("Margit-v0", launch_game=False, host="192.168.48.1:50051")
+env = eldengym.make("Margit-v0", launch_game=False, host="192.168.48.1:50051", save_file_name="ER0000.Margit-v0.sl2", save_file_dir="C:\\Users\\DM\\AppData\\Roaming\\EldenRing\\76561198217475593")
 
 HeroLocalPosX = env.client.get_attribute("HeroLocalPosX")
 

@@ -49,8 +49,9 @@ class RandomAgent:
             Multi-binary action array [num_actions]
         """
         # Random binary actions with given probability
+        # Use int8 to match MultiBinary action space (env.action_space.sample() returns int8)
         action = (self.rng.random(self.num_actions) < self.action_prob).astype(
-            np.float32
+            np.int8
         )
         return action
 

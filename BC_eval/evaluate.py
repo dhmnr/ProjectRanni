@@ -86,6 +86,11 @@ def create_agent(
         if model is None:
             raise ValueError("Model required for 'model' agent type")
 
+        # Get training keybinds path for action mapping
+        training_keybinds_path = config.get("checkpoint", {}).get("training_keybinds_path")
+        if not training_keybinds_path:
+            raise ValueError("checkpoint.training_keybinds_path is required for model agent")
+
         if model.is_temporal:
             return TemporalAgent(
                 model=model,
@@ -93,6 +98,7 @@ def create_agent(
                 frame_shape=frame_shape,
                 env_action_keys=env_action_keys,
                 env_keybinds=env_keybinds,
+                training_keybinds_path=training_keybinds_path,
             )
         else:
             return BaseAgent(
@@ -101,6 +107,7 @@ def create_agent(
                 frame_shape=frame_shape,
                 env_action_keys=env_action_keys,
                 env_keybinds=env_keybinds,
+                training_keybinds_path=training_keybinds_path,
             )
 
     else:
@@ -141,15 +148,18 @@ def create_environment(config: Dict):
     console.print(f"  Launch game: {launch_game}")
     
 
-    # Build kwargs for make()
+    # Build kwargs for make() - only include non-None values
+    # Passing None explicitly can cause issues vs not passing at all
     make_kwargs = {
         "host": host,
         "launch_game": launch_game,
-        "save_file_name": save_file_name,
-        "save_file_dir": save_file_dir,
     }
     if max_steps is not None:
         make_kwargs["max_steps"] = max_steps
+    if save_file_name is not None:
+        make_kwargs["save_file_name"] = save_file_name
+    if save_file_dir is not None:
+        make_kwargs["save_file_dir"] = save_file_dir
 
     env = eldengym.make(env_id, **make_kwargs)
 
@@ -373,10 +383,8 @@ def evaluate(config_path: str, overrides: Optional[Dict] = None):
     # Determine agent type
     agent_type = config.get("agent", {}).get("type", "model")
 
-    # Create environment first (needed for action space mapping)
-    env = create_environment(config)
-
-    # Load model if needed
+    # Load model FIRST (before environment) so model loading doesn't
+    # happen while fight is running after env.reset()
     model = None
     if agent_type == "model":
         checkpoint_config = config.get("checkpoint", {})
@@ -396,6 +404,9 @@ def evaluate(config_path: str, overrides: Optional[Dict] = None):
             anim_mappings_path=anim_mappings_path,
         )
         console.print(f"[green]✓ Model loaded: {model.model_name}[/green]")
+
+    # Create environment (includes initial reset for input handling)
+    env = create_environment(config)
 
     # Create agent with environment for action mapping
     agent = create_agent(config, model, env=env)
