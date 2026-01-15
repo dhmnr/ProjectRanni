@@ -10,13 +10,14 @@ Preprocessing to match BC training:
      * continuous: [10] normalized HP/SP/FP ratios + distance features
      * hero_anim_idx: int32 embedding index for hero animation
      * npc_anim_idx: int32 embedding index for NPC animation
+4. Actions: Maps model's semantic actions to environment's raw key actions
 """
 
 import sys
 from pathlib import Path
 import numpy as np
 import jax.numpy as jnp
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 from collections import deque
 import logging
 
@@ -25,6 +26,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent / "BC_training"))
 
 from ..model_loader import LoadedModel
 from BC_training.common.state_preprocessing import STATE_INDICES
+from BC_eval.agents.base import BaseAgent, build_action_mapping, DEFAULT_TRAINING_ACTIONS
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +52,9 @@ class TemporalAgent(BaseAgent):
         model: LoadedModel,
         action_threshold: float = 0.5,
         frame_shape: tuple = (3, 144, 256),  # C, H, W expected by model
+        env_action_keys: Optional[List[str]] = None,
+        env_keybinds: Optional[Dict[str, str]] = None,
+        training_actions: Optional[List[str]] = None,
     ):
         """Initialize temporal agent.
 
@@ -57,6 +62,9 @@ class TemporalAgent(BaseAgent):
             model: Loaded BC model (must be temporal)
             action_threshold: Threshold for converting probabilities to binary actions
             frame_shape: Expected frame shape (C, H, W) for the model
+            env_action_keys: List of raw key names from environment
+            env_keybinds: Dict mapping key names to semantic actions
+            training_actions: List of semantic action names from training data
         """
         # Don't call super().__init__ to avoid the is_temporal check
         self.model = model
@@ -74,6 +82,17 @@ class TemporalAgent(BaseAgent):
                 f"Use BaseAgent for model '{model.model_name}'"
             )
 
+        # Setup action mapping from model outputs to env actions
+        self.action_mapping = None
+        self.env_num_actions = None
+        if env_action_keys is not None and env_keybinds is not None:
+            training_actions = training_actions or DEFAULT_TRAINING_ACTIONS
+            self.action_mapping = build_action_mapping(
+                env_action_keys, env_keybinds, training_actions
+            )
+            self.env_num_actions = len(env_action_keys)
+            logger.info(f"Action mapping: {self.action_mapping}")
+
         # Temporal config from model
         self.num_history_frames = model.num_history_frames
         self.num_action_history = model.num_action_history
@@ -88,6 +107,8 @@ class TemporalAgent(BaseAgent):
         logger.info(f"  num_action_history: {self.num_action_history}")
         logger.info(f"  action_threshold: {action_threshold}")
         logger.info(f"  frame_shape: {frame_shape}")
+        logger.info(f"  model_num_actions: {self.num_actions}")
+        logger.info(f"  env_num_actions: {self.env_num_actions}")
 
     def _init_buffers(self):
         """Initialize frame and action history buffers."""
@@ -117,18 +138,20 @@ class TemporalAgent(BaseAgent):
         """Preprocess frame from eldengym format.
 
         Args:
-            frame: RGB frame [H, W, C] uint8 from eldengym
+            frame: BGR frame [H, W, C] uint8 from eldengym (cv2.imdecode returns BGR)
 
         Returns:
             Preprocessed frame [C, H, W] float32 normalized (no batch dim)
         """
+        # eldengym returns [H, W, C] uint8 in BGR format (from cv2.imdecode)
+        # Training data was also BGR, so no conversion needed
+
         # Resize if needed
         target_h, target_w = self.frame_shape[1], self.frame_shape[2]
         h, w = frame.shape[:2]
 
         if h != target_h or w != target_w:
             import cv2
-
             frame = cv2.resize(frame, (target_w, target_h), interpolation=cv2.INTER_LINEAR)
 
         # Convert to float and normalize
@@ -236,6 +259,27 @@ class TemporalAgent(BaseAgent):
 
         return state
 
+    def _map_action_to_env(self, model_action: np.ndarray) -> np.ndarray:
+        """Map model's action output to environment's action space.
+
+        Args:
+            model_action: Binary action array from model [model_num_actions]
+
+        Returns:
+            Binary action array for environment [env_num_actions]
+        """
+        if self.action_mapping is None:
+            # No mapping configured, return as-is
+            return model_action
+
+        env_action = np.zeros(self.env_num_actions, dtype=np.float32)
+        for model_idx, env_indices in self.action_mapping.items():
+            if model_action[model_idx] > 0:
+                for env_idx in env_indices:
+                    env_action[env_idx] = 1.0
+
+        return env_action
+
     def act(self, observation: Dict[str, Any]) -> np.ndarray:
         """Select action based on observation.
 
@@ -245,16 +289,19 @@ class TemporalAgent(BaseAgent):
             observation: Environment observation dict with 'frame' and optionally state info
 
         Returns:
-            Multi-binary action array [num_actions]
+            Multi-binary action array [env_num_actions] mapped to environment action space
         """
         probs = self.get_action_probs(observation)
-        action = (probs > self.action_threshold).astype(np.float32)
+        self._last_probs = probs  # Store for logging
+        model_action = (probs > self.action_threshold).astype(np.float32)
 
-        # Update action buffer with the action we're about to take
+        # Update action buffer with the MODEL action (not env action)
+        # The action history should use the same representation as training
         # Note: The current frame was already added in get_action_probs
-        self.action_buffer.append(action)
+        self.action_buffer.append(model_action)
 
-        return action
+        # Map to environment action space for execution
+        return self._map_action_to_env(model_action)
 
     def get_action_probs(self, observation: Dict[str, Any]) -> np.ndarray:
         """Get action probabilities from model.

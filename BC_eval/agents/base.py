@@ -8,13 +8,14 @@ Preprocessing to match BC training:
      * continuous: [10] normalized HP/SP/FP ratios + distance features
      * hero_anim_idx: int32 embedding index for hero animation
      * npc_anim_idx: int32 embedding index for NPC animation
+3. Actions: Maps model's semantic actions to environment's raw key actions
 """
 
 import sys
 from pathlib import Path
 import numpy as np
 import jax.numpy as jnp
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 import logging
 
 # Add BC_training to path for imports
@@ -24,6 +25,75 @@ from ..model_loader import LoadedModel
 from BC_training.common.state_preprocessing import STATE_INDICES
 
 logger = logging.getLogger(__name__)
+
+# Default training action names (from zarr dataset)
+# Order must match the training data exactly
+DEFAULT_TRAINING_ACTIONS = [
+    'move_forward',
+    'move_back',
+    'move_left',
+    'move_right',
+    'dodge_roll/dash',
+    'jump',
+    'crouch/standup',
+    'lock_on',
+    'attack',
+    'strong_attack',
+    'skill',
+    'use_item',
+    'event_action',
+]
+
+# Actions to ignore (gym handles these automatically)
+DISABLED_ACTIONS = {'lock_on'}
+
+
+def build_action_mapping(
+    env_action_keys: List[str],
+    env_keybinds: Dict[str, str],
+    training_actions: List[str],
+    disabled_actions: Optional[set] = None,
+) -> Dict[int, List[int]]:
+    """Build mapping from training action indices to environment action indices.
+
+    Args:
+        env_action_keys: List of raw key names from env (e.g., ['W', 'S', 'A', ...])
+        env_keybinds: Dict mapping key names to semantic actions (e.g., {'W': 'move_forward'})
+        training_actions: List of semantic action names from training data
+        disabled_actions: Set of action names to disable (won't be sent to env)
+
+    Returns:
+        Dict mapping training action index -> list of env action indices
+    """
+    disabled_actions = disabled_actions or DISABLED_ACTIONS
+
+    # Build reverse mapping: semantic action -> list of env key indices
+    semantic_to_env_indices = {}
+    for env_idx, key in enumerate(env_action_keys):
+        semantic = env_keybinds.get(key)
+        if semantic:
+            if semantic not in semantic_to_env_indices:
+                semantic_to_env_indices[semantic] = []
+            semantic_to_env_indices[semantic].append(env_idx)
+
+    # Build training index -> env indices mapping
+    mapping = {}
+    for train_idx, action_name in enumerate(training_actions):
+        # Skip disabled actions
+        if action_name in disabled_actions:
+            logger.info(f"Action '{action_name}' disabled (handled by env)")
+            mapping[train_idx] = []
+            continue
+
+        env_indices = semantic_to_env_indices.get(action_name, [])
+        if env_indices:
+            # Use first matching key (e.g., LEFT_SHIFT for dodge, not BUTTON5)
+            mapping[train_idx] = [env_indices[0]]
+        else:
+            logger.warning(f"Training action '{action_name}' not found in env keybinds")
+            mapping[train_idx] = []
+
+    return mapping
 
 
 class BaseAgent:
@@ -42,6 +112,9 @@ class BaseAgent:
         model: LoadedModel,
         action_threshold: float = 0.5,
         frame_shape: tuple = (3, 144, 256),  # C, H, W expected by model
+        env_action_keys: Optional[List[str]] = None,
+        env_keybinds: Optional[Dict[str, str]] = None,
+        training_actions: Optional[List[str]] = None,
     ):
         """Initialize base agent.
 
@@ -49,6 +122,9 @@ class BaseAgent:
             model: Loaded BC model
             action_threshold: Threshold for converting probabilities to binary actions
             frame_shape: Expected frame shape (C, H, W) for the model
+            env_action_keys: List of raw key names from environment
+            env_keybinds: Dict mapping key names to semantic actions
+            training_actions: List of semantic action names from training data
         """
         self.model = model
         self.action_threshold = action_threshold
@@ -65,10 +141,23 @@ class BaseAgent:
                 f"Use TemporalAgent for model '{model.model_name}'"
             )
 
+        # Setup action mapping from model outputs to env actions
+        self.action_mapping = None
+        self.env_num_actions = None
+        if env_action_keys is not None and env_keybinds is not None:
+            training_actions = training_actions or DEFAULT_TRAINING_ACTIONS
+            self.action_mapping = build_action_mapping(
+                env_action_keys, env_keybinds, training_actions
+            )
+            self.env_num_actions = len(env_action_keys)
+            logger.info(f"Action mapping: {self.action_mapping}")
+
         logger.info(f"Initialized BaseAgent for {model.model_name}")
         logger.info(f"  use_state: {self.use_state}")
         logger.info(f"  action_threshold: {action_threshold}")
         logger.info(f"  frame_shape: {frame_shape}")
+        logger.info(f"  model_num_actions: {self.num_actions}")
+        logger.info(f"  env_num_actions: {self.env_num_actions}")
 
     def reset(self):
         """Reset agent state (no-op for single-frame models)."""
@@ -78,23 +167,20 @@ class BaseAgent:
         """Preprocess frame from eldengym format to model input.
 
         Args:
-            frame: RGB frame [H, W, C] uint8 from eldengym
+            frame: BGR frame [H, W, C] uint8 from eldengym (cv2.imdecode returns BGR)
 
         Returns:
             Preprocessed frame [1, C, H, W] float32 normalized
         """
-        # eldengym returns [H, W, C] uint8
-        # Model expects [B, C, H, W] float32 normalized to [0, 1]
+        # eldengym returns [H, W, C] uint8 in BGR format (from cv2.imdecode)
+        # Training data was also BGR, so no conversion needed
 
-        # Resize if needed (using simple slicing/padding for now)
-        # TODO: Use proper resizing if frame sizes don't match
+        # Resize if needed
         target_h, target_w = self.frame_shape[1], self.frame_shape[2]
         h, w = frame.shape[:2]
 
         if h != target_h or w != target_w:
-            # Simple center crop/pad - in production use proper resize
             import cv2
-
             frame = cv2.resize(frame, (target_w, target_h), interpolation=cv2.INTER_LINEAR)
 
         # Convert to float and normalize
@@ -171,6 +257,27 @@ class BaseAgent:
 
         return state
 
+    def _map_action_to_env(self, model_action: np.ndarray) -> np.ndarray:
+        """Map model's action output to environment's action space.
+
+        Args:
+            model_action: Binary action array from model [model_num_actions]
+
+        Returns:
+            Binary action array for environment [env_num_actions]
+        """
+        if self.action_mapping is None:
+            # No mapping configured, return as-is
+            return model_action
+
+        env_action = np.zeros(self.env_num_actions, dtype=np.float32)
+        for model_idx, env_indices in self.action_mapping.items():
+            if model_action[model_idx] > 0:
+                for env_idx in env_indices:
+                    env_action[env_idx] = 1.0
+
+        return env_action
+
     def act(self, observation: Dict[str, Any]) -> np.ndarray:
         """Select action based on observation.
 
@@ -178,11 +285,14 @@ class BaseAgent:
             observation: Environment observation dict with 'frame' and optionally state info
 
         Returns:
-            Multi-binary action array [num_actions]
+            Multi-binary action array [env_num_actions] mapped to environment action space
         """
         probs = self.get_action_probs(observation)
-        action = (probs > self.action_threshold).astype(np.float32)
-        return action
+        self._last_probs = probs  # Store for logging
+        model_action = (probs > self.action_threshold).astype(np.float32)
+
+        # Map to environment action space
+        return self._map_action_to_env(model_action)
 
     def get_action_probs(self, observation: Dict[str, Any]) -> np.ndarray:
         """Get action probabilities from model.

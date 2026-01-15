@@ -1,0 +1,36 @@
+# BC Evaluation Config - Temporal CNN
+# Evaluate a trained temporal CNN model against Margit
+
+# Agent configuration
+agent:
+  type: model  # 'model' or 'random'
+
+# Model checkpoint (required for agent.type: model)
+# NOTE: Update path to your trained checkpoint
+checkpoint:
+  path: "./checkpoints/temporal_cnn/best.pkl"  # Change this to your checkpoint
+  training_config: "./BC_training/configs/temporal_cnn.yaml"
+  # Animation ID mappings for state preprocessing
+  anim_mappings_path: "./dataset/anim_id_mappings.json"
+
+# EldenGym environment configuration
+environment:
+  env_id: "Margit-v0"
+  host: "192.168.48.1:50051"
+  launch_game: false
+  max_steps: 10000
+
+# Evaluation settings
+evaluation:
+  num_episodes: 10
+  action_threshold: 0.5  # Threshold for converting probabilities to binary actions
+  render: false
+  max_steps_per_episode: null
+  frame_shape: [3, 144, 256]  # C, H, W expected by model
+
+# Logging configuration
+logging:
+  use_wandb: false
+  wandb_project: "ProjectRanni-Eval"
+  wandb_entity: "dhmnr-projects"
+  wandb_run_name: "eval_temporal_cnn"

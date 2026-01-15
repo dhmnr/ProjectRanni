@@ -58,12 +58,29 @@ class LoadedModel:
             self.frame_skip = 1
 
     def _get_num_actions(self) -> int:
-        """Extract num_actions from model config."""
+        """Extract num_actions from model config or params."""
         # Most configs store this in the model params directly or we infer from output layer
         if "num_actions" in self.config.get("model", {}):
             return self.config["model"]["num_actions"]
-        # Default for Elden Ring dataset
-        return 7
+
+        # Try to infer from output layer params
+        try:
+            # Look for action head or output layer
+            if 'action_head' in self.params:
+                return self.params['action_head']['kernel'].shape[-1]
+            elif 'Dense_0' in self.params:
+                # Find the last dense layer
+                last_dense = None
+                for key in self.params:
+                    if key.startswith('Dense'):
+                        last_dense = key
+                if last_dense:
+                    return self.params[last_dense]['kernel'].shape[-1]
+        except Exception:
+            pass
+
+        # Default for Elden Ring dataset (13 actions)
+        return 13
 
     def __call__(
         self,
@@ -160,7 +177,7 @@ def load_checkpoint(checkpoint_path: str) -> Tuple[Dict, int]:
 def load_model(
     checkpoint_path: str,
     training_config_path: str,
-    num_actions: int = 7,
+    num_actions: int = 13,
     anim_mappings_path: Optional[str] = None,
 ) -> LoadedModel:
     """Load a trained BC model for inference.
