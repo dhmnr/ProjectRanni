@@ -1,0 +1,73 @@
+# Onset/Offset Transformer Configuration
+# Predicts action onset (0→1) and offset (1→0) transitions
+
+dataset:
+  path: "./dataset/margit_100_256x144_v2.zarr"
+  train_ratio: 0.8
+  val_ratio: 0.2
+  split_seed: 42
+  normalize_frames: true
+  validate_episodes: true
+
+# Onset/offset chunking settings
+onset_offset:
+  num_frames: 8       # Number of observation frames
+  chunk_size: 8       # Number of future onset/offset predictions
+
+model:
+  name: onset_offset_transformer
+
+  # Transformer configuration
+  d_model: 512
+  num_heads: 8
+  num_encoder_layers: 4
+  num_decoder_layers: 4
+  d_ff: 2048
+
+  dropout_rate: 0.1
+
+training:
+  batch_size: 32
+  num_epochs: 100
+  learning_rate: 0.0001
+  weight_decay: 0.00001
+  use_class_weights: true
+  label_smoothing: 0.0
+  lr_schedule:
+    type: reduce_on_plateau
+    factor: 0.5
+    patience: 5
+    min_lr: 0.000001
+  grad_clip_norm: 1.0
+  checkpoint_dir: "./checkpoints/onset_offset_transformer"
+  save_every_n_epochs: 10
+  keep_last_n_checkpoints: 3
+
+  # Loss function - Focal loss for sparse onset/offset events
+  loss:
+    type: focal
+    gamma: 2.0
+    alpha: null
+
+  # Early stopping
+  early_stopping:
+    enabled: true
+    patience: 10
+    monitor: val_loss
+
+evaluation:
+  eval_every_n_epochs: 1
+  metrics_threshold: 0.5
+
+logging:
+  use_wandb: true
+  wandb_project: "ProjectRanni-BC"
+  wandb_entity: "dhmnr-projects"
+  wandb_run_name: "onset_offset_d512_h8_enc4_dec4"
+  log_every_n_steps: 50
+  log_gradients: false
+
+system:
+  seed: 42
+  num_workers: 4
+  pin_memory: false
