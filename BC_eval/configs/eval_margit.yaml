@@ -11,6 +11,8 @@ checkpoint:
   training_config: "./BC_training/configs/temporal_cnn.yaml"
   # Animation ID mappings for state preprocessing (auto-detected from dataset path if null)
   anim_mappings_path: "./dataset/anim_id_mappings.json"
+  # Keybinds used during training - must match zarr dataset keys order
+  training_keybinds_path: "./gameplay_pipeline/configs/keybinds_v2_7.json"
 
 # EldenGym environment configuration
 environment:
