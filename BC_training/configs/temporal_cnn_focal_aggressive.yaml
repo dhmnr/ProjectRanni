@@ -10,6 +10,11 @@ dataset:
   use_state: true
   validate_episodes: true
 
+  # Oversample rare actions (dodge/attack) to balance class distribution
+  oversample:
+    actions: ["dodge_roll/dash", "attack"]
+    ratio: 5.0
+
 temporal:
   num_history_frames: 4
   num_action_history: 4

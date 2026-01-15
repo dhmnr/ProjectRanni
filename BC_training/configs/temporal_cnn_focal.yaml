@@ -10,10 +10,15 @@ dataset:
   use_state: true
   validate_episodes: true
 
+  # Oversample rare actions (dodge/attack) to balance class distribution
+  oversample:
+    actions: ["dodge_roll/dash", "attack"]
+    ratio: 5.0
+
 # Temporal context settings
 temporal:
   num_history_frames: 4   # 4 past frames + current = 5 total
-  num_action_history: 4   # 4 past actions
+  num_action_history: 0   # 4 past actions
   frame_skip: 1           # Every frame
 
 # State preprocessing
@@ -35,7 +40,7 @@ model:
 
 training:
   batch_size: 32
-  num_epochs: 50
+  num_epochs: 10
   learning_rate: 0.001
   weight_decay: 0.001
   lr_schedule:

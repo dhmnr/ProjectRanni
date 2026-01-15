@@ -14,33 +14,10 @@ checkpoint:
 
 # EldenGym environment configuration
 environment:
-  scenario_name: "margit"
-  siphon_config: "./gameplay_pipeline/configs/er_siphon_config.toml"
-  keybinds: "./gameplay_pipeline/configs/keybinds.json"
-  host: "localhost:50051"
-  max_steps: 10000  # Max steps per episode (null for unlimited)
-  # Memory attributes - MUST match what was used during training data collection
-  # All 19 attributes from BC_training/common/state_preprocessing.py STATE_INDICES
-  memory_attributes:
-    - "HeroHp"
-    - "HeroMaxHp"
-    - "HeroSp"
-    - "HeroMaxSp"
-    - "HeroFp"
-    - "HeroMaxFp"
-    - "HeroGlobalPosX"
-    - "HeroGlobalPosY"
-    - "HeroGlobalPosZ"
-    - "HeroAngle"
-    - "HeroAnimId"
-    - "NpcHp"
-    - "NpcMaxHp"
-    - "NpcId"
-    - "NpcGlobalPosX"
-    - "NpcGlobalPosY"
-    - "NpcGlobalPosZ"
-    - "NpcGlobalPosAngle"
-    - "NpcAnimId"
+  env_id: "Margit-v0"
+  host: "192.168.48.1:50051"
+  launch_game: false
+  max_steps: 10000
 
 # Evaluation settings
 evaluation:
@@ -56,4 +33,3 @@ logging:
   wandb_project: "ProjectRanni-Eval"
   wandb_entity: null  # Your wandb entity/username
   wandb_run_name: "eval_margit_temporal_cnn"
-

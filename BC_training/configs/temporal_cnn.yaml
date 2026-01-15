@@ -10,10 +10,15 @@ dataset:
   use_state: true  # Include state features
   validate_episodes: true
 
+  # Oversample rare actions (dodge/attack) to balance class distribution
+  oversample:
+    actions: ["dodge_roll/dash", "attack"]
+    ratio: 10.0  # 5x more samples with these actions
+
 # Temporal context settings
 temporal:
-  num_history_frames: 4   # Include 4 past frames (total 5 frames including current)
-  num_action_history: 4   # Include 4 past actions
+  num_history_frames: 8   # Include 8 past frames (total 9 frames including current)
+  num_action_history: 0   # Include 4 past actions
   frame_skip: 1           # Every frame (1 = no skip, 2 = every other frame)
 
 # State preprocessing (same as hybrid_state)
@@ -46,7 +51,7 @@ model:
 
 training:
   batch_size: 32
-  num_epochs: 50
+  num_epochs: 10
   learning_rate: 0.001
   weight_decay: 0.001
   lr_schedule:

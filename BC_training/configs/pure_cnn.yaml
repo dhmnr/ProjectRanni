@@ -2,7 +2,7 @@
 
 # Dataset
 dataset:
-  path: "./dataset/margit_100_256x144.zarr"
+  path: "./dataset/margit_100_256x144_v2.zarr"
   train_ratio: 0.8
   val_ratio: 0.2
   split_seed: 42
@@ -21,8 +21,8 @@ model:
 # Training
 training:
   batch_size: 32
-  num_epochs: 50
-  learning_rate: 0.001
+  num_epochs: 10
+  learning_rate: 0.0001
   weight_decay: 0.0001
   
   # Learning rate schedule
@@ -32,6 +32,8 @@ training:
     min_lr: 0.00001
   
   # Loss
+  loss:
+    type: "bce"
   use_class_weights: true  # Weight loss by action frequency
   label_smoothing: 0.0  # Optional label smoothing
   
@@ -39,7 +41,7 @@ training:
   grad_clip_norm: 1.0
   
   # Checkpointing
-  checkpoint_dir: "./checkpoints/pure_cnn"
+  checkpoint_dir: "./BC_training/checkpoints/pure_cnn"
   save_every_n_epochs: 5
   keep_last_n_checkpoints: 3
 
