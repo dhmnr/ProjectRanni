@@ -690,12 +690,10 @@ wheels = [
 
 [[package]]
 name = "eldengym"
-version = "0.3.1"
+version = "0.4.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "anthropic" },
-    { name = "grpcio" },
-    { name = "grpcio-tools" },
     { name = "gymnasium" },
     { name = "ipykernel" },
     { name = "matplotlib" },
@@ -703,11 +701,11 @@ dependencies = [
     { name = "numpy", version = "2.4.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
     { name = "opencv-python" },
     { name = "pillow" },
-    { name = "tomli", marker = "python_full_version < '3.11'" },
+    { name = "pysiphon" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/af/db/3d02b12b3bb076e38580e10a8070d657ffb2b9a4bbd2e7a79ec2293a52d6/eldengym-0.3.1.tar.gz", hash = "sha256:0b526da89a41f33315d8089a288cce74632ea9b8c60d61733f7b78bf6c180788", size = 240681, upload-time = "2025-10-22T10:46:09.638Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/bf/0a/0cd9bfcc1734212c48cf941d6d2168043d521ebe8332819e50d48281e32e/eldengym-0.4.1.tar.gz", hash = "sha256:ff57f69ae0f2081728877a8557dfa4ceb060bf213b1af5bc853adb28d664919b", size = 237394, upload-time = "2026-01-10T23:56:50.592Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/d4/88/188ddc6c0999a0c79fb3ebb5589890cff9a45716dbd418386a58609634c8/eldengym-0.3.1-py3-none-any.whl", hash = "sha256:b696786b1e083bc443eddf1c9a5bfe4527f70a7a09dc8d33b39693ca43f56827", size = 24965, upload-time = "2025-10-22T10:46:08.16Z" },
+    { url = "https://files.pythonhosted.org/packages/66/1a/19fff38165401c5762218dfb567198b47decd206d7470c77813032330803/eldengym-0.4.1-py3-none-any.whl", hash = "sha256:a72224b41ede0adeed820857cb789c4e1964f5f7d6e516febb87c1ae024f6c55", size = 19116, upload-time = "2026-01-10T23:56:48.996Z" },
 ]
 
 [[package]]
@@ -2955,7 +2953,7 @@ yt-data-pipeline = [
 
 [package.metadata.requires-dev]
 bc-eval = [
-    { name = "eldengym", specifier = ">=0.3.1" },
+    { name = "eldengym", specifier = ">=0.4.1" },
     { name = "flax", specifier = ">=0.8.0" },
     { name = "jax", specifier = ">=0.4.26" },
     { name = "jaxlib", specifier = ">=0.4.26" },
@@ -3273,7 +3271,7 @@ wheels = [
 
 [[package]]
 name = "pysiphon"
-version = "1.0.3"
+version = "1.1.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "click" },
@@ -3282,9 +3280,9 @@ dependencies = [
     { name = "pillow" },
     { name = "tomli" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/c4/de/4631049fb8d5eecab0ced4f0fc06fdeed2f49b9a69e7fdab0f35512e9835/pysiphon-1.0.3.tar.gz", hash = "sha256:930e2ee3fe81b8a287c18f15216db2593412de4fff6d04bfde340d17633add52", size = 21316, upload-time = "2025-11-18T09:54:12.35Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/d0/df/5c0a44f1742a8a78562472091579701212a8d85efdfee71e8dc673278497/pysiphon-1.1.0.tar.gz", hash = "sha256:b0b17620ce0eb50d25a971e1c0b4dab3b3a26b79db7697885962c5a31e362554", size = 24654, upload-time = "2025-12-17T06:49:41.678Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/11/18/f9259c922b5fb07de69c9b443b456a3b8cc5f748640c75a307563032a972/pysiphon-1.0.3-py3-none-any.whl", hash = "sha256:1fa9809f66211915e9d75acca50d7ff1850cc126187ca5246dc52a8560a77920", size = 21671, upload-time = "2025-11-18T09:54:10.954Z" },
+    { url = "https://files.pythonhosted.org/packages/99/bb/7e9c72ff236d871d316c97cc66cb14b2e7b337d5b49279f0c0f8edcc0ac9/pysiphon-1.1.0-py3-none-any.whl", hash = "sha256:bf99b6cb54af5aa85679315bba885205f44b98d410cbce41de40f924f4094370", size = 24534, upload-time = "2025-12-17T06:49:40.432Z" },
 ]
 
 [[package]]

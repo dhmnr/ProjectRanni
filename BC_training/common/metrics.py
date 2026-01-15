@@ -1,11 +1,51 @@
 """Evaluation metrics for behavior cloning."""
 
+import json
 import numpy as np
 import jax.numpy as jnp
+from pathlib import Path
 from typing import Dict, List, Optional
 import logging
 
 logger = logging.getLogger(__name__)
+
+
+def load_action_names(action_keys: List[str], keybinds_path: str = None) -> List[str]:
+    """Map dataset action keys to semantic action names using keybinds_v2.json.
+
+    Args:
+        action_keys: List of action keys from the dataset (e.g., ['W', 'S', 'A', 'D', 'P', ...])
+        keybinds_path: Optional path to keybinds file
+
+    Returns:
+        List of semantic action names matching the order of action_keys
+        (e.g., ['move_forward', 'move_back', 'move_left', 'move_right', 'attack', ...])
+    """
+    if keybinds_path is None:
+        # Default path relative to BC_training
+        keybinds_path = Path(__file__).parent.parent.parent / "gameplay_pipeline/configs/keybinds_v2.json"
+
+    with open(keybinds_path) as f:
+        keybinds = json.load(f)
+
+    # Build key -> semantic name mapping
+    key_to_name = {}
+    for action_name, action_info in keybinds["actions"].items():
+        key = action_info.get("key")
+        if key:
+            key_to_name[key] = action_name
+        # Also check mouse binding
+        mouse = action_info.get("mouse")
+        if mouse:
+            key_to_name[mouse] = action_name
+
+    # Map dataset action keys to semantic names
+    action_names = []
+    for key in action_keys:
+        semantic_name = key_to_name.get(key, key)  # Fallback to key if not found
+        action_names.append(semantic_name)
+
+    return action_names
 
 
 def compute_accuracy(predictions: np.ndarray, targets: np.ndarray, threshold: float = 0.5) -> float:
