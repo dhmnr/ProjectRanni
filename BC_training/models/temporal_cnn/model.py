@@ -333,6 +333,9 @@ class TemporalCNN(nn.Module):
         1. Channel stacking: Concat frames along channel dim before CNN
         2. Shared encoder: Process each frame independently, concat features
         3. 3D Conv: Use 3D convolutions (not implemented)
+
+    Auxiliary tasks:
+        - NPC animation prediction: Predict NPC animation ID from visual features only
     """
 
     num_actions: int
@@ -363,6 +366,14 @@ class TemporalCNN(nn.Module):
     use_cross_attention: bool = False  # Cross-attention between frames and states
     attention_num_heads: int = 4
     attention_head_dim: int = 32
+
+    # Auxiliary task: predict NPC animation from vision
+    use_aux_npc_anim: bool = False  # Enable auxiliary NPC animation prediction
+    aux_npc_anim_classes: int = 16  # Number of animation classes (top N + "other")
+
+    # Animation onset timing feature
+    use_anim_onset_timing: bool = False  # Include frames_since_npc_anim_onset
+    anim_onset_encoding_dim: int = 16  # Dimension of sinusoidal encoding
     
     @nn.compact
     def __call__(
@@ -372,16 +383,18 @@ class TemporalCNN(nn.Module):
         state=None,
         hero_anim_idx=None,
         npc_anim_idx=None,
+        anim_onset_encoding=None,
         training: bool = True,
     ):
         """Forward pass.
-        
+
         Args:
             frames: [B, T, C, H, W] stacked frames (T = num_history_frames + 1)
             action_history: [B, K, num_actions] past actions
-            state: Optional [B, num_state_features] current state
-            hero_anim_idx: Optional [B] hero animation indices
-            npc_anim_idx: Optional [B] NPC animation indices
+            state: Optional [B, num_state_features] current state or [B, T, num_state_features]
+            hero_anim_idx: Optional [B] or [B, T] hero animation indices
+            npc_anim_idx: Optional [B] or [B, T] NPC animation indices
+            anim_onset_encoding: Optional [B, encoding_dim] or [B, T, encoding_dim] sinusoidal timing
             training: Whether in training mode
             
         Returns:
@@ -449,6 +462,18 @@ class TemporalCNN(nn.Module):
                 # Concat all frame features: [B, T * feat_dim]
                 x_vision = frame_features_temporal.reshape(batch_size, -1)
         
+        # === Auxiliary task: predict NPC animation from vision ===
+        aux_npc_anim_logits = None
+        if self.use_aux_npc_anim:
+            # Predict NPC animation from visual features ONLY (before fusion with state)
+            # This forces the visual encoder to learn attack recognition
+            aux_hidden = nn.Dense(features=128)(x_vision)
+            if self.use_batch_norm:
+                aux_hidden = nn.BatchNorm(use_running_average=not training)(aux_hidden)
+            aux_hidden = nn.relu(aux_hidden)
+            aux_hidden = nn.Dropout(rate=self.dropout_rate, deterministic=not training)(aux_hidden)
+            aux_npc_anim_logits = nn.Dense(features=self.aux_npc_anim_classes, name='aux_npc_anim_head')(aux_hidden)
+
         # === Combine features ===
         features_to_concat = [x_vision]
         
@@ -559,7 +584,17 @@ class TemporalCNN(nn.Module):
             )(frame_attended, training=training)
 
             features_to_concat.append(x_cross)
-        
+
+        # === Animation onset timing feature ===
+        if self.use_anim_onset_timing and anim_onset_encoding is not None:
+            if anim_onset_encoding.ndim == 3:
+                # Stacked: [B, T, encoding_dim] -> use last timestep [B, encoding_dim]
+                x_onset = anim_onset_encoding[:, -1, :]
+            else:
+                # Single: [B, encoding_dim]
+                x_onset = anim_onset_encoding
+            features_to_concat.append(x_onset)
+
         # === Fusion and prediction ===
         x = jnp.concatenate(features_to_concat, axis=-1)
         
@@ -573,9 +608,16 @@ class TemporalCNN(nn.Module):
                 x = nn.Dropout(rate=self.dropout_rate, deterministic=not training)(x)
         
         # Output logits
-        x = nn.Dense(features=self.num_actions)(x)
-        
-        return x
+        action_logits = nn.Dense(features=self.num_actions)(x)
+
+        # Return dict if auxiliary task is enabled, else just action logits
+        if self.use_aux_npc_anim:
+            return {
+                'action_logits': action_logits,
+                'aux_npc_anim_logits': aux_npc_anim_logits,
+            }
+
+        return action_logits
 
 
 def create_model(
@@ -601,6 +643,10 @@ def create_model(
     use_cross_attention: bool = False,
     attention_num_heads: int = 4,
     attention_head_dim: int = 32,
+    use_aux_npc_anim: bool = False,
+    aux_npc_anim_classes: int = 16,
+    use_anim_onset_timing: bool = False,
+    anim_onset_encoding_dim: int = 16,
 ) -> TemporalCNN:
     """Factory function to create TemporalCNN model.
 
@@ -627,6 +673,10 @@ def create_model(
         use_cross_attention: Cross-attention between frames and states
         attention_num_heads: Number of attention heads
         attention_head_dim: Dimension per attention head
+        use_aux_npc_anim: Enable auxiliary NPC animation prediction from vision
+        aux_npc_anim_classes: Number of NPC animation classes for auxiliary task
+        use_anim_onset_timing: Enable animation onset timing feature
+        anim_onset_encoding_dim: Dimension of sinusoidal encoding for onset timing
 
     Returns:
         TemporalCNN model instance
@@ -654,6 +704,10 @@ def create_model(
         use_cross_attention=use_cross_attention,
         attention_num_heads=attention_num_heads,
         attention_head_dim=attention_head_dim,
+        use_aux_npc_anim=use_aux_npc_anim,
+        aux_npc_anim_classes=aux_npc_anim_classes,
+        use_anim_onset_timing=use_anim_onset_timing,
+        anim_onset_encoding_dim=anim_onset_encoding_dim,
     )
 
     total_frames = num_history_frames + 1
@@ -674,6 +728,10 @@ def create_model(
     if use_frame_attention or use_state_attention or use_cross_attention:
         logger.info(f"  Attention: frame={use_frame_attention}, state={use_state_attention}, cross={use_cross_attention}")
         logger.info(f"  Attention heads: {attention_num_heads}, head_dim: {attention_head_dim}")
+    if use_aux_npc_anim:
+        logger.info(f"  Auxiliary task: NPC animation prediction ({aux_npc_anim_classes} classes)")
+    if use_anim_onset_timing:
+        logger.info(f"  Animation onset timing: encoding_dim={anim_onset_encoding_dim}")
 
     return model
 
