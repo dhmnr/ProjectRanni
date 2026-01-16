@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Dict, List, Tuple, Optional
 import logging
 
-from .state_preprocessing import StatePreprocessor, create_preprocessor
+from .state_preprocessing import StatePreprocessor, create_preprocessor, sinusoidal_encoding
 
 logger = logging.getLogger(__name__)
 
@@ -323,10 +323,10 @@ def split_episodes(
 
 class TemporalGameplayDataset:
     """Dataset for loading gameplay recordings with temporal context.
-    
+
     Returns sequences of frames and action history for temporal modeling.
     """
-    
+
     def __init__(
         self,
         dataset_path: str,
@@ -341,6 +341,8 @@ class TemporalGameplayDataset:
         oversample_actions: Optional[List[int]] = None,
         oversample_ratio: float = 1.0,
         stack_states: bool = False,
+        use_anim_onset_timing: bool = False,
+        anim_onset_encoding_dim: int = 16,
     ):
         """Initialize temporal dataset.
 
@@ -358,6 +360,8 @@ class TemporalGameplayDataset:
             oversample_ratio: How much to oversample (e.g., 2.0 = double rare samples,
                               or target ratio to match majority class frequency)
             stack_states: Whether to stack states temporally (same as frames) instead of single state
+            use_anim_onset_timing: Whether to include frames_since_npc_anim_onset feature
+            anim_onset_encoding_dim: Dimension for sinusoidal encoding of onset timing
         """
         self.dataset_path = Path(dataset_path)
         self.use_state = use_state
@@ -369,6 +373,8 @@ class TemporalGameplayDataset:
         self.oversample_actions = oversample_actions
         self.oversample_ratio = oversample_ratio
         self.stack_states = stack_states
+        self.use_anim_onset_timing = use_anim_onset_timing
+        self.anim_onset_encoding_dim = anim_onset_encoding_dim
 
         # Total lookback needed
         self.lookback = max(
@@ -403,6 +409,10 @@ class TemporalGameplayDataset:
 
         # Build episode index mapping (skipping early frames that lack history)
         self._build_episode_index()
+
+        # Pre-compute animation onset timing if requested
+        if self.use_anim_onset_timing:
+            self._precompute_anim_onset_timing()
 
         # Apply oversampling if requested
         if self.oversample_actions and self.oversample_ratio > 1.0:
@@ -466,6 +476,44 @@ class TemporalGameplayDataset:
                 self.index.append((ep_name, frame_idx))
         
         logger.info(f"Total valid frames: {len(self.index)} (skipped first {self.lookback} per episode)")
+
+    def _precompute_anim_onset_timing(self):
+        """Pre-compute frames_since_npc_anim_onset for each episode.
+
+        For each frame, computes how many frames have passed since the NPC
+        started its current animation. This resets to 0 when animation changes.
+
+        Stores result in self.episode_anim_onset[ep_name] = np.array of shape [num_frames]
+        """
+        logger.info("Pre-computing NPC animation onset timing...")
+
+        # NPC animation ID index in state array
+        NPC_ANIM_IDX = 18  # NpcAnimId
+
+        self.episode_anim_onset = {}
+
+        for ep_name in self.episodes:
+            ep = self.zarr_root[ep_name]
+            state = np.array(ep['state'][:])
+            npc_anims = state[:, NPC_ANIM_IDX].astype(np.int64)
+            num_frames = len(npc_anims)
+
+            # Compute frames since animation onset
+            frames_since_onset = np.zeros(num_frames, dtype=np.int32)
+            current_anim = npc_anims[0]
+            counter = 0
+
+            for i in range(num_frames):
+                if npc_anims[i] != current_anim:
+                    # Animation changed - reset counter
+                    current_anim = npc_anims[i]
+                    counter = 0
+                frames_since_onset[i] = counter
+                counter += 1
+
+            self.episode_anim_onset[ep_name] = frames_since_onset
+
+        logger.info(f"Pre-computed animation onset timing for {len(self.episodes)} episodes")
 
     def _apply_oversampling(self):
         """Oversample sequences containing rare actions to balance class distribution.
@@ -626,6 +674,25 @@ class TemporalGameplayDataset:
                 result['hero_anim_idx'] = processed['hero_anim_idx']
                 result['npc_anim_idx'] = processed['npc_anim_idx']
 
+        # === Optionally include animation onset timing ===
+        if self.use_anim_onset_timing:
+            if self.stack_states:
+                # Get onset timing for each frame in the sequence
+                onset_timings = np.array([
+                    self.episode_anim_onset[ep_name][fi] for fi in frame_indices
+                ], dtype=np.int32)  # [T]
+                # Apply sinusoidal encoding: [T] -> [T, encoding_dim]
+                result['anim_onset_encoding'] = sinusoidal_encoding(
+                    onset_timings, dim=self.anim_onset_encoding_dim
+                )
+            else:
+                # Single frame timing
+                onset_timing = self.episode_anim_onset[ep_name][frame_idx]
+                # Apply sinusoidal encoding: [] -> [encoding_dim]
+                result['anim_onset_encoding'] = sinusoidal_encoding(
+                    np.array([onset_timing]), dim=self.anim_onset_encoding_dim
+                )[0]
+
         return result
 
 
@@ -666,6 +733,9 @@ def create_temporal_data_loader(
             batch['state'] = np.stack([d['state'] for d in batch_data])
             batch['hero_anim_idx'] = np.stack([d['hero_anim_idx'] for d in batch_data])
             batch['npc_anim_idx'] = np.stack([d['npc_anim_idx'] for d in batch_data])
+
+        if dataset.use_anim_onset_timing:
+            batch['anim_onset_encoding'] = np.stack([d['anim_onset_encoding'] for d in batch_data])
 
         yield batch
 
