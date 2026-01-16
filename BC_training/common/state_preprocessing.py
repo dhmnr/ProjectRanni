@@ -7,6 +7,7 @@ Output structure:
     - continuous: [B, 10] float32 - resources (4) + distances (6)
     - hero_anim_idx: [B] int32 - index for embedding lookup
     - npc_anim_idx: [B] int32 - index for embedding lookup
+    - anim_onset_encoding: [B, encoding_dim] float32 - sinusoidal encoding of frames since anim onset
 """
 
 import numpy as np
@@ -16,6 +17,48 @@ import json
 import logging
 
 logger = logging.getLogger(__name__)
+
+
+def sinusoidal_encoding(positions: np.ndarray, dim: int = 16, max_period: float = 60.0) -> np.ndarray:
+    """Encode positions using sinusoidal encoding (like Transformer positional encoding).
+
+    This encoding allows the model to learn relative timing patterns, where nearby
+    positions have similar encodings and the model can easily learn "around frame 8-10".
+
+    Args:
+        positions: Array of positions/frame counts, shape [B] or [B, T]
+        dim: Dimension of encoding (must be even)
+        max_period: Maximum period for the highest frequency component.
+                   For animation timing, 60 frames (~2 seconds at 30fps) is reasonable.
+
+    Returns:
+        Encoded positions, shape [B, dim] or [B, T, dim]
+    """
+    assert dim % 2 == 0, "Encoding dimension must be even"
+
+    # Ensure positions is float
+    positions = np.asarray(positions, dtype=np.float32)
+    original_shape = positions.shape
+
+    # Flatten for computation
+    positions_flat = positions.reshape(-1)
+
+    # Create frequency bands (exponentially spaced)
+    # Higher frequencies capture fine-grained timing, lower frequencies capture coarse patterns
+    half_dim = dim // 2
+    freqs = np.exp(np.arange(half_dim) * (-np.log(max_period) / half_dim))
+
+    # Compute angles: [num_positions, half_dim]
+    angles = positions_flat[:, np.newaxis] * freqs[np.newaxis, :]
+
+    # Interleave sin and cos: [num_positions, dim]
+    encoding = np.zeros((len(positions_flat), dim), dtype=np.float32)
+    encoding[:, 0::2] = np.sin(angles)
+    encoding[:, 1::2] = np.cos(angles)
+
+    # Reshape to match input
+    output_shape = original_shape + (dim,)
+    return encoding.reshape(output_shape)
 
 
 # State attribute indices (from zarr dataset)
