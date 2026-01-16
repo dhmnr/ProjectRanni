@@ -131,6 +131,8 @@ def create_train_state(
     is_state_only: bool = False,
     is_state_chunking: bool = False,
     num_temporal_states: int = 8,
+    use_anim_onset_timing: bool = False,
+    anim_onset_encoding_dim: int = 16,
 ) -> TrainState:
     """Initialize model and create train state.
 
@@ -209,6 +211,19 @@ def create_train_state(
                 anim_idx_shape = (batch_size,)
 
             # Temporal with state + embeddings
+            # Prepare anim_onset_encoding if enabled
+            if use_anim_onset_timing:
+                # Shape matches anim_idx_shape + encoding_dim
+                if len(anim_idx_shape) == 2:
+                    # Stacked: [B, T, encoding_dim]
+                    onset_shape = (batch_size, anim_idx_shape[1], anim_onset_encoding_dim)
+                else:
+                    # Single: [B, encoding_dim]
+                    onset_shape = (batch_size, anim_onset_encoding_dim)
+                anim_onset_encoding = jnp.zeros(onset_shape, dtype=jnp.float32)
+            else:
+                anim_onset_encoding = None
+
             variables = model.init(
                 {'params': init_rng, 'dropout': dropout_rng},
                 jnp.ones(input_shape),                      # frames [B, T, C, H, W]
@@ -216,6 +231,7 @@ def create_train_state(
                 jnp.ones(state_shape),                      # continuous state
                 jnp.zeros(anim_idx_shape, dtype=jnp.int32),  # hero_anim_idx
                 jnp.zeros(anim_idx_shape, dtype=jnp.int32),  # npc_anim_idx
+                anim_onset_encoding,                         # anim_onset_encoding (optional)
                 training=False,
             )
         else:
@@ -661,37 +677,38 @@ def train_step_temporal_with_state(state: TrainState, batch: Dict, action_weight
             batch['state'],
             batch['hero_anim_idx'],
             batch['npc_anim_idx'],
+            batch.get('anim_onset_encoding', None),  # Optional animation onset timing
             training=True,
             mutable=['batch_stats'] if state.batch_stats is not None else False,
             rngs={'dropout': dropout_rng},
         )
-        
+
         # Get previous action for onset weighting (last in history = t-1)
         if batch['action_history'].shape[1] > 0:
             previous_actions = batch['action_history'][:, -1, :]
         else:
             previous_actions = None
-        
+
         loss = _current_loss_fn(
             logits,
             batch['actions'],
             weights=action_weights,
             previous_actions=previous_actions,
         )
-        
+
         new_batch_stats = new_variables.get('batch_stats', None)
         return loss, (logits, new_batch_stats)
-    
+
     grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
     (loss, (logits, new_batch_stats)), grads = grad_fn(state.params)
-    
+
     state = state.apply_gradients(grads=grads)
     if new_batch_stats is not None:
         state = state.replace(batch_stats=new_batch_stats)
-    
+
     predictions = jax.nn.sigmoid(logits)
     accuracy = compute_accuracy_jax(predictions, batch['actions'])
-    
+
     return state, {'loss': loss, 'accuracy': accuracy}
 
 
@@ -749,7 +766,7 @@ def eval_step_temporal_with_state(state: TrainState, batch: Dict):
     variables = {'params': state.params}
     if state.batch_stats is not None:
         variables['batch_stats'] = state.batch_stats
-    
+
     logits = state.apply_fn(
         variables,
         batch['frames'],
@@ -757,11 +774,12 @@ def eval_step_temporal_with_state(state: TrainState, batch: Dict):
         batch['state'],
         batch['hero_anim_idx'],
         batch['npc_anim_idx'],
+        batch.get('anim_onset_encoding', None),  # Optional animation onset timing
         training=False
     )
     loss = _current_loss_fn(logits, batch['actions'])
     predictions = jax.nn.sigmoid(logits)
-    
+
     return predictions, loss
 
 
@@ -782,6 +800,144 @@ def eval_step_temporal_no_state(state: TrainState, batch: Dict):
     predictions = jax.nn.sigmoid(logits)
 
     return predictions, loss
+
+
+# ============================================================================
+# Auxiliary Task: NPC Animation Prediction from Vision
+# ============================================================================
+
+# Global variable for auxiliary loss weight (set in main)
+_aux_loss_weight = 0.5
+
+
+def set_aux_loss_weight(weight: float):
+    """Set the auxiliary loss weight globally."""
+    global _aux_loss_weight
+    _aux_loss_weight = weight
+
+
+def train_step_temporal_with_aux(state: TrainState, batch: Dict, action_weights: jnp.ndarray, rng):
+    """Training step for temporal models with auxiliary NPC animation prediction.
+
+    The model returns a dict with 'action_logits' and 'aux_npc_anim_logits'.
+    Total loss = action_loss + aux_weight * aux_loss
+    """
+    dropout_rng = jax.random.fold_in(rng, state.step)
+
+    def loss_fn(params):
+        variables = {'params': params}
+        if state.batch_stats is not None:
+            variables['batch_stats'] = state.batch_stats
+
+        outputs, new_variables = state.apply_fn(
+            variables,
+            batch['frames'],
+            batch['action_history'],
+            batch['state'],
+            batch['hero_anim_idx'],
+            batch['npc_anim_idx'],
+            batch.get('anim_onset_encoding', None),  # Optional animation onset timing
+            training=True,
+            mutable=['batch_stats'] if state.batch_stats is not None else False,
+            rngs={'dropout': dropout_rng},
+        )
+
+        # Extract outputs from dict
+        action_logits = outputs['action_logits']
+        aux_npc_anim_logits = outputs['aux_npc_anim_logits']
+
+        # Get previous action for onset weighting (last in history = t-1)
+        if batch['action_history'].shape[1] > 0:
+            previous_actions = batch['action_history'][:, -1, :]
+        else:
+            previous_actions = None
+
+        # Main action loss
+        action_loss = _current_loss_fn(
+            action_logits,
+            batch['actions'],
+            weights=action_weights,
+            previous_actions=previous_actions,
+        )
+
+        # Auxiliary loss: cross-entropy for NPC animation classification
+        # Target is the NPC animation index (use last timestep if stacked)
+        npc_anim_target = batch['npc_anim_idx']
+        if npc_anim_target.ndim == 2:
+            # Stacked states: use the current frame's animation (last timestep)
+            npc_anim_target = npc_anim_target[:, -1]
+
+        # Cross-entropy loss for auxiliary task
+        aux_loss = optax.softmax_cross_entropy_with_integer_labels(
+            aux_npc_anim_logits, npc_anim_target
+        ).mean()
+
+        # Total loss
+        total_loss = action_loss + _aux_loss_weight * aux_loss
+
+        new_batch_stats = new_variables.get('batch_stats', None)
+        return total_loss, (action_logits, action_loss, aux_loss, new_batch_stats)
+
+    grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
+    (total_loss, (action_logits, action_loss, aux_loss, new_batch_stats)), grads = grad_fn(state.params)
+
+    state = state.apply_gradients(grads=grads)
+    if new_batch_stats is not None:
+        state = state.replace(batch_stats=new_batch_stats)
+
+    predictions = jax.nn.sigmoid(action_logits)
+    accuracy = compute_accuracy_jax(predictions, batch['actions'])
+
+    return state, {
+        'loss': total_loss,
+        'action_loss': action_loss,
+        'aux_loss': aux_loss,
+        'accuracy': accuracy,
+    }
+
+
+def eval_step_temporal_with_aux(state: TrainState, batch: Dict):
+    """Eval step for temporal models with auxiliary NPC animation prediction."""
+    variables = {'params': state.params}
+    if state.batch_stats is not None:
+        variables['batch_stats'] = state.batch_stats
+
+    outputs = state.apply_fn(
+        variables,
+        batch['frames'],
+        batch['action_history'],
+        batch['state'],
+        batch['hero_anim_idx'],
+        batch['npc_anim_idx'],
+        batch.get('anim_onset_encoding', None),  # Optional animation onset timing
+        training=False
+    )
+
+    # Extract outputs from dict
+    action_logits = outputs['action_logits']
+    aux_npc_anim_logits = outputs['aux_npc_anim_logits']
+
+    # Main action loss
+    action_loss = _current_loss_fn(action_logits, batch['actions'])
+
+    # Auxiliary loss
+    npc_anim_target = batch['npc_anim_idx']
+    if npc_anim_target.ndim == 2:
+        npc_anim_target = npc_anim_target[:, -1]
+
+    aux_loss = optax.softmax_cross_entropy_with_integer_labels(
+        aux_npc_anim_logits, npc_anim_target
+    ).mean()
+
+    total_loss = action_loss + _aux_loss_weight * aux_loss
+
+    predictions = jax.nn.sigmoid(action_logits)
+
+    # Also compute auxiliary accuracy
+    aux_preds = jnp.argmax(aux_npc_anim_logits, axis=-1)
+    aux_accuracy = (aux_preds == npc_anim_target).mean()
+
+    return predictions, total_loss, action_loss, aux_loss, aux_accuracy
 
 
 # ============================================================================
@@ -1426,7 +1582,14 @@ def evaluate(
         eval_fn = eval_step_action_chunking_with_state if dataset_uses_state else eval_step_action_chunking
         data_loader_fn = create_action_chunking_data_loader
     elif is_temporal:
-        eval_fn = eval_step_temporal_with_state if use_state else eval_step_temporal_no_state
+        # Check if auxiliary task is enabled
+        aux_config = config.get('auxiliary', {})
+        use_aux_npc_anim = aux_config.get('use_npc_anim_prediction', False)
+
+        if use_aux_npc_anim and use_state:
+            eval_fn = jax.jit(eval_step_temporal_with_aux)
+        else:
+            eval_fn = eval_step_temporal_with_state if use_state else eval_step_temporal_no_state
         data_loader_fn = create_temporal_data_loader
     else:
         eval_fn = eval_step_hybrid if use_state else eval_step_vision
@@ -1440,7 +1603,14 @@ def evaluate(
     all_targets = []
     all_previous_actions = []  # For onset metrics
     total_loss = 0.0
+    total_action_loss = 0.0  # For auxiliary task
+    total_aux_loss = 0.0  # For auxiliary task
+    total_aux_accuracy = 0.0  # For auxiliary task
     batches_processed = 0
+
+    # Check if auxiliary task is enabled (for is_temporal)
+    aux_config = config.get('auxiliary', {})
+    use_aux_npc_anim = is_temporal and aux_config.get('use_npc_anim_prediction', False) and use_state
     
     if show_progress:
         with Progress(
@@ -1463,6 +1633,13 @@ def evaluate(
                     predictions, targets, loss = eval_fn(state, batch)
                     all_predictions.append(np.asarray(predictions))
                     all_targets.append(np.asarray(targets))
+                elif use_aux_npc_anim:
+                    predictions, loss, action_loss, aux_loss, aux_accuracy = eval_fn(state, batch)
+                    all_predictions.append(np.asarray(predictions))
+                    all_targets.append(np.asarray(batch['actions']))
+                    total_action_loss += float(action_loss)
+                    total_aux_loss += float(aux_loss)
+                    total_aux_accuracy += float(aux_accuracy)
                 else:
                     predictions, loss = eval_fn(state, batch)
                     all_predictions.append(np.asarray(predictions))
@@ -1487,6 +1664,13 @@ def evaluate(
                 predictions, targets, loss = eval_fn(state, batch)
                 all_predictions.append(np.asarray(predictions))
                 all_targets.append(np.asarray(targets))
+            elif use_aux_npc_anim:
+                predictions, loss, action_loss, aux_loss, aux_accuracy = eval_fn(state, batch)
+                all_predictions.append(np.asarray(predictions))
+                all_targets.append(np.asarray(batch['actions']))
+                total_action_loss += float(action_loss)
+                total_aux_loss += float(aux_loss)
+                total_aux_accuracy += float(aux_accuracy)
             else:
                 predictions, loss = eval_fn(state, batch)
                 all_predictions.append(np.asarray(predictions))
@@ -1627,6 +1811,12 @@ def evaluate(
         '_all_predictions': all_predictions,  # Raw predictions for histogram
         '_all_targets': all_targets,  # Raw targets for histogram
     }
+
+    # Add auxiliary task metrics if enabled
+    if use_aux_npc_anim and batches_processed > 0:
+        metrics['action_loss'] = float(total_action_loss / batches_processed)
+        metrics['aux_loss'] = float(total_aux_loss / batches_processed)
+        metrics['aux_accuracy'] = float(total_aux_accuracy / batches_processed)
 
     return metrics
 
@@ -1834,6 +2024,12 @@ def train(config_path: str):
         # Check if states should be stacked temporally
         stack_states = config.get('temporal', {}).get('stack_states', False)
 
+        # Animation onset timing feature
+        use_anim_onset_timing = config.get('temporal', {}).get('use_anim_onset_timing', False)
+        anim_onset_encoding_dim = config.get('temporal', {}).get('anim_onset_encoding_dim', 16)
+        if use_anim_onset_timing:
+            console.print(f"[cyan]Animation onset timing: encoding_dim={anim_onset_encoding_dim}[/cyan]")
+
         train_dataset = TemporalGameplayDataset(
             dataset_path=dataset_path,
             episode_indices=train_indices,
@@ -1847,6 +2043,8 @@ def train(config_path: str):
             oversample_actions=oversample_actions,
             oversample_ratio=oversample_ratio,
             stack_states=stack_states,
+            use_anim_onset_timing=use_anim_onset_timing,
+            anim_onset_encoding_dim=anim_onset_encoding_dim,
         )
 
         # No oversampling for validation set
@@ -1861,6 +2059,8 @@ def train(config_path: str):
             num_action_history=num_action_history,
             frame_skip=frame_skip,
             stack_states=stack_states,
+            use_anim_onset_timing=use_anim_onset_timing,
+            anim_onset_encoding_dim=anim_onset_encoding_dim,
         )
     else:
         # Standard single-frame dataset
@@ -1962,6 +2162,16 @@ def train(config_path: str):
         attention_num_heads = attention_config.get('num_heads', 4)
         attention_head_dim = attention_config.get('head_dim', 32)
 
+        # Auxiliary task config
+        aux_config = config.get('auxiliary', {})
+        use_aux_npc_anim = aux_config.get('use_npc_anim_prediction', False)
+        aux_npc_anim_classes = aux_config.get('npc_anim_classes', 16)
+        aux_loss_weight = aux_config.get('loss_weight', 0.5)
+
+        # Animation onset timing config
+        use_anim_onset_timing = temporal_config.get('use_anim_onset_timing', False)
+        anim_onset_encoding_dim = temporal_config.get('anim_onset_encoding_dim', 16)
+
         console.print(f"[cyan]Temporal config: {num_history_frames} history frames, {num_action_history} action history[/cyan]")
         if use_state:
             console.print(f"[cyan]Stack states: {stack_states}[/cyan]")
@@ -1971,6 +2181,10 @@ def train(config_path: str):
         if use_frame_attention or use_state_attention or use_cross_attention:
             console.print(f"[cyan]Attention: frames={use_frame_attention}, states={use_state_attention}, cross={use_cross_attention}[/cyan]")
             console.print(f"[cyan]Attention config: heads={attention_num_heads}, head_dim={attention_head_dim}[/cyan]")
+        if use_aux_npc_anim:
+            console.print(f"[cyan]Auxiliary task: NPC animation prediction ({aux_npc_anim_classes} classes, weight={aux_loss_weight})[/cyan]")
+        if use_anim_onset_timing:
+            console.print(f"[cyan]Animation onset timing: encoding_dim={anim_onset_encoding_dim}[/cyan]")
 
         model = create_model(
             num_actions=num_actions,
@@ -1995,6 +2209,10 @@ def train(config_path: str):
             use_cross_attention=use_cross_attention,
             attention_num_heads=attention_num_heads,
             attention_head_dim=attention_head_dim,
+            use_aux_npc_anim=use_aux_npc_anim,
+            aux_npc_anim_classes=aux_npc_anim_classes,
+            use_anim_onset_timing=use_anim_onset_timing,
+            anim_onset_encoding_dim=anim_onset_encoding_dim,
         )
     elif model_name == 'gru':
         from models.gru import create_model
@@ -2296,6 +2514,11 @@ def train(config_path: str):
     # Get num_states for state_chunking
     num_temporal_states = config.get('state_chunking', {}).get('num_states', 8) if is_state_chunking else 8
 
+    # Get animation onset timing config
+    temporal_config = config.get('temporal', {})
+    use_anim_onset_timing = temporal_config.get('use_anim_onset_timing', False)
+    anim_onset_encoding_dim = temporal_config.get('anim_onset_encoding_dim', 16)
+
     state = create_train_state(
         model=model,
         learning_rate=config['training']['learning_rate'],
@@ -2310,6 +2533,8 @@ def train(config_path: str):
         is_state_only=is_action_combo,  # Action combo is state-only (no frames)
         is_state_chunking=is_state_chunking,  # State chunking is temporal state-only
         num_temporal_states=num_temporal_states,
+        use_anim_onset_timing=use_anim_onset_timing,
+        anim_onset_encoding_dim=anim_onset_encoding_dim,
     )
     console.print("[green]✓ Model initialized and ready![/green]")
     
@@ -2381,7 +2606,18 @@ def train(config_path: str):
         train_fn = train_step_action_chunking_with_state if use_state_chunking else train_step_action_chunking
         data_loader_fn = create_action_chunking_data_loader
     elif is_temporal:
-        train_fn = train_step_temporal_with_state if use_state else train_step_temporal_no_state
+        # Check if auxiliary task is enabled
+        aux_config = config.get('auxiliary', {})
+        use_aux_npc_anim = aux_config.get('use_npc_anim_prediction', False)
+
+        if use_aux_npc_anim and use_state:
+            # Set auxiliary loss weight
+            aux_loss_weight = aux_config.get('loss_weight', 0.5)
+            set_aux_loss_weight(aux_loss_weight)
+            train_fn = jax.jit(train_step_temporal_with_aux)
+            console.print(f"[cyan]Using auxiliary NPC animation prediction (weight={aux_loss_weight})[/cyan]")
+        else:
+            train_fn = train_step_temporal_with_state if use_state else train_step_temporal_no_state
         data_loader_fn = create_temporal_data_loader
     else:
         train_fn = train_step_hybrid if use_state else train_step_vision
