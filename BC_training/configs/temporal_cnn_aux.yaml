@@ -1,5 +1,5 @@
-# Temporal CNN Model Configuration with Focal Loss
-# Frame stacking + action history for temporal context
+# Temporal CNN Model Configuration with Auxiliary Task
+# Auxiliary task: Predict NPC animation from vision (forces visual attack recognition)
 
 dataset:
   path: "./dataset/margit_100_256x144.zarr"
@@ -21,6 +21,13 @@ temporal:
   num_action_history: 0
   frame_skip: 1           # Every frame (1 = no skip, 2 = every other frame)
   stack_states: true      # Stack states temporally (same as frames) instead of single current state
+
+# Auxiliary task configuration
+# Forces the visual encoder to learn attack recognition from pixels
+auxiliary:
+  use_npc_anim_prediction: true  # Enable NPC animation prediction from vision
+  npc_anim_classes: 54           # Number of NPC animation classes (matches npc_vocab_size)
+  loss_weight: 0.5               # Weight for auxiliary loss (total_loss = action_loss + weight * aux_loss)
 
 # State preprocessing (same as hybrid_state)
 state_preprocessing:
@@ -53,33 +60,31 @@ model:
 # Attention mechanisms (optional)
 # Requires: stack_states=true for state attention, shared_encoder mode for frame attention
 attention:
-  use_frame_attention: true   # Self-attention over temporal frame features
-  use_state_attention: true   # Self-attention over temporal state features
-  use_cross_attention: true   # Cross-attention between frames and states
+  use_frame_attention: false   # Self-attention over temporal frame features
+  use_state_attention: false   # Self-attention over temporal state features
+  use_cross_attention: false   # Cross-attention between frames and states
   num_heads: 4                 # Number of attention heads
   head_dim: 32                 # Dimension per attention head
 
 training:
   batch_size: 32
-  num_epochs: 10
+  num_epochs: 15
   learning_rate: 0.001
   weight_decay: 0.001
   lr_schedule:
     type: cosine
-    warmup_epochs: 5
+    warmup_epochs: 3
     min_lr: 0.00001
   use_class_weights: true
   label_smoothing: 0.0
   grad_clip_norm: 1.0
-  checkpoint_dir: "./checkpoints/temporal_cnn_focal"
+  checkpoint_dir: "./checkpoints/temporal_cnn_aux"
   save_every_n_epochs: 10
   keep_last_n_checkpoints: 3
 
-  # Focal loss configuration
+  # BCE loss for main task
   loss:
-    type: focal
-    gamma: 3.0    # Higher = more focus on hard examples (attack/dodge)
-    alpha: 0.4    # Balance for rare positives
+    type: bce
 
 evaluation:
   eval_every_n_epochs: 1
@@ -90,7 +95,7 @@ logging:
   use_wandb: true
   wandb_project: "ProjectRanni-BC"
   wandb_entity: "dhmnr-projects"
-  wandb_run_name: "temporal_cnn_focal"
+  wandb_run_name: "temporal_cnn_aux"
   log_every_n_steps: 50
   log_gradients: false
 

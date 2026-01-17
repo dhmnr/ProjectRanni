@@ -1,5 +1,5 @@
-# Temporal CNN Model Configuration with Focal Loss
-# Frame stacking + action history for temporal context
+# Temporal CNN Model Configuration with Animation Onset Timing
+# Uses sinusoidal encoding of "frames since NPC animation started" to help with dodge timing
 
 dataset:
   path: "./dataset/margit_100_256x144.zarr"
@@ -22,6 +22,12 @@ temporal:
   frame_skip: 1           # Every frame (1 = no skip, 2 = every other frame)
   stack_states: true      # Stack states temporally (same as frames) instead of single current state
 
+  # Animation onset timing feature
+  # Adds "frames since NPC animation started" with sinusoidal encoding
+  # Based on analysis showing players dodge at consistent timings within specific animations
+  use_anim_onset_timing: true
+  anim_onset_encoding_dim: 16  # Dimension of sinusoidal encoding
+
 # State preprocessing (same as hybrid_state)
 state_preprocessing:
   normalize_resources: true
@@ -31,8 +37,6 @@ state_preprocessing:
 model:
   name: temporal_cnn
   # Frame processing mode: 'channel_stack' or 'shared_encoder'
-  # channel_stack: Faster, fewer params, treats time as extra channels
-  # shared_encoder: More flexible, explicit per-frame features
   frame_mode: channel_stack
 
   # CNN encoder (shared or for stacked channels)
@@ -50,47 +54,44 @@ model:
   dropout_rate: 0.3
   use_batch_norm: true
 
-# Attention mechanisms (optional)
-# Requires: stack_states=true for state attention, shared_encoder mode for frame attention
+# Attention mechanisms (disabled for this experiment to isolate onset timing effect)
 attention:
-  use_frame_attention: true   # Self-attention over temporal frame features
-  use_state_attention: true   # Self-attention over temporal state features
-  use_cross_attention: true   # Cross-attention between frames and states
-  num_heads: 4                 # Number of attention heads
-  head_dim: 32                 # Dimension per attention head
+  use_frame_attention: false
+  use_state_attention: false
+  use_cross_attention: false
+  num_heads: 4
+  head_dim: 32
 
 training:
   batch_size: 32
-  num_epochs: 10
+  num_epochs: 15
   learning_rate: 0.001
   weight_decay: 0.001
   lr_schedule:
     type: cosine
-    warmup_epochs: 5
+    warmup_epochs: 3
     min_lr: 0.00001
   use_class_weights: true
   label_smoothing: 0.0
   grad_clip_norm: 1.0
-  checkpoint_dir: "./checkpoints/temporal_cnn_focal"
+  checkpoint_dir: "./checkpoints/temporal_cnn_onset"
   save_every_n_epochs: 10
   keep_last_n_checkpoints: 3
 
-  # Focal loss configuration
+  # BCE loss for main task
   loss:
-    type: focal
-    gamma: 3.0    # Higher = more focus on hard examples (attack/dodge)
-    alpha: 0.4    # Balance for rare positives
+    type: bce
 
 evaluation:
   eval_every_n_epochs: 1
   metrics_threshold: 0.5
-  onset_buffer_frames: 5   # ±5 frames tolerance for buffered onset metrics (~167ms at 30fps)
+  onset_buffer_frames: 5
 
 logging:
   use_wandb: true
   wandb_project: "ProjectRanni-BC"
   wandb_entity: "dhmnr-projects"
-  wandb_run_name: "temporal_cnn_focal"
+  wandb_run_name: "temporal_cnn_onset"
   log_every_n_steps: 50
   log_gradients: false
 
