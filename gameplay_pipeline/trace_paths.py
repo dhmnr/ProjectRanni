@@ -22,6 +22,8 @@ from rich.console import Console
 from rich.live import Live
 from rich.table import Table
 
+from .arena_boundary import ArenaBoundary
+
 console = Console()
 
 
@@ -173,6 +175,7 @@ class PathTracer:
         stop_on_death: bool = True,
         show_live: bool = True,
         live_plot: bool = False,
+        arena_boundary: Optional[str] = None,
     ) -> PathData:
         """
         Trace player and boss paths.
@@ -203,12 +206,31 @@ class PathTracer:
             console.print(f"  Max duration: {max_duration}s")
         if live_plot:
             console.print(f"  Live plot: enabled")
+        if arena_boundary:
+            console.print(f"  Arena boundary: {arena_boundary}")
         console.print("[yellow]Press Ctrl+C to stop[/yellow]\n")
+
+        # Load arena boundary if provided
+        boundary = None
+        if arena_boundary:
+            boundary = ArenaBoundary.load(arena_boundary)
+            console.print(f"[green]Loaded arena boundary[/green]")
 
         # Track offsets for tile boundary jump compensation (shared for player and boss)
         offset_x, offset_y = 0.0, 0.0
         last_player_local_x, last_player_local_y = None, None
         last_chunk_x, last_chunk_y = None, None
+
+        # Track last computed global coords for fallback jump detection
+        last_computed_global_x, last_computed_global_y = None, None
+
+        # Track last valid NPC coords for outlier filtering
+        last_valid_boss_x, last_valid_boss_y = None, None
+        NPC_JUMP_THRESHOLD = 20.0  # If NPC jumps more than this without chunk change, it's a glitch
+
+        # Thresholds for detecting tile boundary jumps
+        LOCAL_JUMP_THRESHOLD = 25.0  # Local coords jump ~32 at boundary
+        GLOBAL_JUMP_THRESHOLD = 25.0  # If computed global jumps this much, it's a missed boundary
 
         # Continuous plot coordinates (separate from PathPoint storage)
         plot_player_xs, plot_player_ys = [], []
@@ -216,15 +238,35 @@ class PathTracer:
 
         # Setup live plot if enabled
         fig, ax, player_line, boss_line, player_marker, boss_marker = None, None, None, None, None, None
+        dist_lines = {'north': None, 'south': None, 'east': None, 'west': None}
+        dist_text = None
         if live_plot:
             plt.ion()
-            fig, ax = plt.subplots(figsize=(10, 8))
+            fig, ax = plt.subplots(figsize=(12, 10))
             player_line, = ax.plot([], [], 'b-', linewidth=2, label='Player')
             boss_line, = ax.plot([], [], 'r-', linewidth=2, label='Boss')
             player_marker, = ax.plot([], [], 'bo', markersize=10)
             boss_marker, = ax.plot([], [], 'ro', markersize=10)
-            ax.set_xlabel('Global Y', fontsize=12)
-            ax.set_ylabel('Global X', fontsize=12)
+
+            # Add arena boundary if loaded
+            if boundary:
+                x_poly, y_poly = boundary.polygon.exterior.xy
+                ax.plot(x_poly, y_poly, 'k-', linewidth=2, label='Arena')
+                ax.fill(x_poly, y_poly, alpha=0.1, color='green')
+
+                # Distance lines (will be updated each frame)
+                dist_lines['north'], = ax.plot([], [], 'g--', linewidth=1.5, alpha=0.7)
+                dist_lines['south'], = ax.plot([], [], 'g--', linewidth=1.5, alpha=0.7)
+                dist_lines['east'], = ax.plot([], [], 'g--', linewidth=1.5, alpha=0.7)
+                dist_lines['west'], = ax.plot([], [], 'g--', linewidth=1.5, alpha=0.7)
+
+                # Distance text annotation
+                dist_text = ax.text(0.02, 0.98, '', transform=ax.transAxes, fontsize=10,
+                                   verticalalignment='top', fontfamily='monospace',
+                                   bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+
+            ax.set_xlabel('Global Y (horizontal)', fontsize=12)
+            ax.set_ylabel('Global X (vertical)', fontsize=12)
             ax.set_title('Live Path Trace', fontsize=14, fontweight='bold')
             ax.legend(loc='upper right')
             ax.set_aspect('equal')
@@ -265,17 +307,65 @@ class PathTracer:
                     curr_boss_x = positions["npc_global_x"]
                     curr_boss_y = positions["npc_global_y"]
 
-                    # Detect tile boundary crossing by chunk change
+                    # Filter NPC coordinate glitches (large jumps without chunk change)
+                    chunk_changed = False
+
+                    # Detect tile boundary crossing using multiple methods
                     if last_chunk_x is not None:
                         chunk_delta_x = curr_chunk_x - last_chunk_x
                         chunk_delta_y = curr_chunk_y - last_chunk_y
-                        # If chunk changed, compensate for the jump in local coords
+                        local_delta_x = curr_player_x - last_player_local_x
+                        local_delta_y = curr_player_y - last_player_local_y
+
+                        # Method 1: Detect by chunk change (primary method)
                         if abs(chunk_delta_x) > 1.0:
-                            local_delta_x = curr_player_x - last_player_local_x
                             offset_x -= local_delta_x
+                            chunk_changed = True
+                            console.print(f"\n[yellow]Chunk X changed: {last_chunk_x:.1f} -> {curr_chunk_x:.1f}, local_delta={local_delta_x:.1f}, offset_x now {offset_x:.1f}[/yellow]")
                         if abs(chunk_delta_y) > 1.0:
-                            local_delta_y = curr_player_y - last_player_local_y
                             offset_y -= local_delta_y
+                            chunk_changed = True
+                            console.print(f"\n[yellow]Chunk Y changed: {last_chunk_y:.1f} -> {curr_chunk_y:.1f}, local_delta={local_delta_y:.1f}, offset_y now {offset_y:.1f}[/yellow]")
+
+                        # Method 2: Fallback - detect by large local coord jump even if chunk didn't change
+                        # This catches cases where chunk update was missed in sampling
+                        if not chunk_changed and abs(local_delta_x) > LOCAL_JUMP_THRESHOLD:
+                            offset_x -= local_delta_x
+                            chunk_changed = True
+                            console.print(f"\n[magenta]Local X jump detected: {last_player_local_x:.1f} -> {curr_player_x:.1f}, offset_x now {offset_x:.1f}[/magenta]")
+                        if not chunk_changed and abs(local_delta_y) > LOCAL_JUMP_THRESHOLD:
+                            offset_y -= local_delta_y
+                            chunk_changed = True
+                            console.print(f"\n[magenta]Local Y jump detected: {last_player_local_y:.1f} -> {curr_player_y:.1f}, offset_y now {offset_y:.1f}[/magenta]")
+
+                    # Method 3: Final sanity check - detect by computed global position jump
+                    # This catches any remaining missed boundaries
+                    if last_computed_global_x is not None and not chunk_changed:
+                        test_global_x = curr_player_x + offset_x
+                        test_global_y = curr_player_y + offset_y
+                        global_delta_x = test_global_x - last_computed_global_x
+                        global_delta_y = test_global_y - last_computed_global_y
+
+                        if abs(global_delta_x) > GLOBAL_JUMP_THRESHOLD:
+                            offset_x -= global_delta_x
+                            chunk_changed = True
+                            console.print(f"\n[red]Global X discontinuity: jump of {global_delta_x:.1f}, correcting offset_x to {offset_x:.1f}[/red]")
+                        if abs(global_delta_y) > GLOBAL_JUMP_THRESHOLD:
+                            offset_y -= global_delta_y
+                            chunk_changed = True
+                            console.print(f"\n[red]Global Y discontinuity: jump of {global_delta_y:.1f}, correcting offset_y to {offset_y:.1f}[/red]")
+
+                    # Filter NPC glitches: if NPC jumped too much without chunk change, use last valid
+                    if last_valid_boss_x is not None and not chunk_changed:
+                        boss_delta_x = abs(curr_boss_x - last_valid_boss_x)
+                        boss_delta_y = abs(curr_boss_y - last_valid_boss_y)
+                        if boss_delta_x > NPC_JUMP_THRESHOLD or boss_delta_y > NPC_JUMP_THRESHOLD:
+                            # Glitch detected, use last valid values
+                            curr_boss_x = last_valid_boss_x
+                            curr_boss_y = last_valid_boss_y
+
+                    # Update last valid NPC coords
+                    last_valid_boss_x, last_valid_boss_y = curr_boss_x, curr_boss_y
 
                     last_chunk_x, last_chunk_y = curr_chunk_x, curr_chunk_y
                     last_player_local_x, last_player_local_y = curr_player_x, curr_player_y
@@ -283,6 +373,9 @@ class PathTracer:
                     # Compute continuous global positions (shared offset for both)
                     player_global_x = curr_player_x + offset_x
                     player_global_y = curr_player_y + offset_y
+
+                    # Update last computed global for Method 3 sanity check
+                    last_computed_global_x, last_computed_global_y = player_global_x, player_global_y
                     boss_global_x = curr_boss_x + offset_x
                     boss_global_y = curr_boss_y + offset_y
 
@@ -323,6 +416,32 @@ class PathTracer:
                         boss_line.set_data(plot_boss_xs, plot_boss_ys)
                         player_marker.set_data([plot_player_xs[-1]], [plot_player_ys[-1]])
                         boss_marker.set_data([plot_boss_xs[-1]], [plot_boss_ys[-1]])
+
+                        # Update distance lines if boundary is loaded
+                        if boundary is not None:
+                            px, py = plot_player_xs[-1], plot_player_ys[-1]
+                            result = boundary.query(px, py)
+
+                            # Draw lines to boundaries in 4 directions
+                            if result.north < float('inf'):
+                                dist_lines['north'].set_data([px, px], [py, py + result.north])
+                            if result.south < float('inf'):
+                                dist_lines['south'].set_data([px, px], [py, py - result.south])
+                            if result.east < float('inf'):
+                                dist_lines['east'].set_data([px, px + result.east], [py, py])
+                            if result.west < float('inf'):
+                                dist_lines['west'].set_data([px, px - result.west], [py, py])
+
+                            # Update distance text
+                            status = "INSIDE" if result.inside else "OUTSIDE"
+                            dist_text.set_text(
+                                f"Status: {status}\n"
+                                f"Nearest: {result.nearest:6.2f}\n"
+                                f"North:   {result.north:6.2f}\n"
+                                f"South:   {result.south:6.2f}\n"
+                                f"East:    {result.east:6.2f}\n"
+                                f"West:    {result.west:6.2f}"
+                            )
 
                         # Auto-scale axes
                         ax.relim()
@@ -468,6 +587,7 @@ def visualize_paths(
     figsize: tuple = (12, 10),
     background_image: Optional[str] = None,
     image_bounds: Optional[tuple] = None,
+    player_only: bool = False,
 ) -> plt.Figure:
     """
     Visualize paths on a 2D plot.
@@ -481,6 +601,7 @@ def visualize_paths(
         figsize: Figure size
         background_image: Optional path to background image
         image_bounds: Bounds for background image (x_min, x_max, y_min, y_max)
+        player_only: Only show player path (hide boss)
 
     Returns:
         matplotlib Figure
@@ -517,13 +638,15 @@ def visualize_paths(
             ax.plot(player_x[i:i+2], player_y[i:i+2], color=color, linewidth=2)
 
         # Plot boss path with gradient (red to orange)
-        for i in range(len(boss_x) - 1):
-            color = plt.cm.Reds(0.3 + 0.7 * t_norm[i])
-            ax.plot(boss_x[i:i+2], boss_y[i:i+2], color=color, linewidth=2)
+        if not player_only:
+            for i in range(len(boss_x) - 1):
+                color = plt.cm.Reds(0.3 + 0.7 * t_norm[i])
+                ax.plot(boss_x[i:i+2], boss_y[i:i+2], color=color, linewidth=2)
     else:
         # Simple solid color paths
         ax.plot(player_x, player_y, 'b-', linewidth=2, label='Player')
-        ax.plot(boss_x, boss_y, 'r-', linewidth=2, label='Boss')
+        if not player_only:
+            ax.plot(boss_x, boss_y, 'r-', linewidth=2, label='Boss')
 
     # Mark start and end points
     ax.scatter([player_x[0]], [player_y[0]], c='blue', s=100, marker='o',
@@ -531,10 +654,11 @@ def visualize_paths(
     ax.scatter([player_x[-1]], [player_y[-1]], c='cyan', s=100, marker='s',
                edgecolors='white', linewidths=2, zorder=5, label='Player End')
 
-    ax.scatter([boss_x[0]], [boss_y[0]], c='red', s=100, marker='o',
-               edgecolors='white', linewidths=2, zorder=5, label='Boss Start')
-    ax.scatter([boss_x[-1]], [boss_y[-1]], c='orange', s=100, marker='s',
-               edgecolors='white', linewidths=2, zorder=5, label='Boss End')
+    if not player_only:
+        ax.scatter([boss_x[0]], [boss_y[0]], c='red', s=100, marker='o',
+                   edgecolors='white', linewidths=2, zorder=5, label='Boss Start')
+        ax.scatter([boss_x[-1]], [boss_y[-1]], c='orange', s=100, marker='s',
+                   edgecolors='white', linewidths=2, zorder=5, label='Boss End')
 
     # Styling
     ax.set_xlabel('Global Y', fontsize=12)
@@ -622,6 +746,10 @@ def main():
         help="Show real-time plot while tracing"
     )
     trace_parser.add_argument(
+        "--arena-boundary", default=None,
+        help="Arena boundary JSON file (shows distances in live plot)"
+    )
+    trace_parser.add_argument(
         "--visualize", action="store_true",
         help="Generate visualization after tracing"
     )
@@ -656,6 +784,10 @@ def main():
         "--no-gradient", action="store_true",
         help="Use solid colors instead of time gradient"
     )
+    viz_parser.add_argument(
+        "--player-only", action="store_true",
+        help="Show only player path (hide boss)"
+    )
 
     args = parser.parse_args()
 
@@ -669,6 +801,7 @@ def main():
                     stop_on_death=not args.no_stop_on_death,
                     show_live=not args.quiet,
                     live_plot=args.live_plot,
+                    arena_boundary=args.arena_boundary,
                 )
 
                 if args.visualize:
@@ -700,6 +833,7 @@ def main():
                 show_time_gradient=not args.no_gradient,
                 background_image=args.background,
                 image_bounds=bounds,
+                player_only=args.player_only,
             )
 
             if not args.output:
