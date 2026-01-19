@@ -133,19 +133,18 @@ class PathTracer:
 
     def get_current_positions(self) -> Dict[str, Optional[float]]:
         """
-        Get current chunk and local positions.
+        Get current positions.
 
         Returns:
-            Dictionary with chunk_x, chunk_y, hero_local_x, hero_local_y,
-            npc_global_x, npc_global_y
+            Dictionary with hero global/local and npc local positions
         """
         return {
-            "chunk_x": self.get_attribute("ChunkX"),
-            "chunk_y": self.get_attribute("ChunkY"),
+            "hero_global_x": self.get_attribute("HeroGlobalPosX"),
+            "hero_global_y": self.get_attribute("HeroGlobalPosY"),
             "hero_local_x": self.get_attribute("HeroLocalPosX"),
             "hero_local_y": self.get_attribute("HeroLocalPosY"),
-            "npc_global_x": self.get_attribute("NpcGlobalPosX"),
-            "npc_global_y": self.get_attribute("NpcGlobalPosY"),
+            "npc_local_x": self.get_attribute("NpcGlobalPosX"),  # Actually local coords
+            "npc_local_y": self.get_attribute("NpcGlobalPosY"),
         }
 
     @staticmethod
@@ -167,6 +166,15 @@ class PathTracer:
         """
         return chunk - local
 
+    def set_attribute(self, name: str, value, value_type: str = "bool") -> bool:
+        """Set a single attribute value."""
+        try:
+            self.client.set_attribute(name, value, value_type)
+            return True
+        except Exception as e:
+            console.print(f"[yellow]Warning: Could not set '{name}': {e}[/yellow]")
+            return False
+
     def trace_paths(
         self,
         output_path: str = "./path_data.json",
@@ -176,6 +184,7 @@ class PathTracer:
         show_live: bool = True,
         live_plot: bool = False,
         arena_boundary: Optional[str] = None,
+        freeze_boss: bool = False,
     ) -> PathData:
         """
         Trace player and boss paths.
@@ -187,10 +196,16 @@ class PathTracer:
             stop_on_death: Stop when player or boss HP reaches 0
             show_live: Show live position updates
             live_plot: Show real-time plot of paths
+            freeze_boss: Disable boss movement and attacks during tracing
 
         Returns:
             PathData containing the recorded paths
         """
+        # Freeze boss if requested
+        if freeze_boss:
+            console.print("[cyan]Freezing boss (NoMove + NoAttack)...[/cyan]")
+            self.set_attribute("NpcNoMove", True, "bool")
+            self.set_attribute("NpcNoAttack", True, "bool")
         sample_interval = 1.0 / sample_rate
         path_data = PathData()
         path_data.metadata = {
@@ -216,21 +231,13 @@ class PathTracer:
             boundary = ArenaBoundary.load(arena_boundary)
             console.print(f"[green]Loaded arena boundary[/green]")
 
-        # Track offsets for tile boundary jump compensation (shared for player and boss)
-        offset_x, offset_y = 0.0, 0.0
-        last_player_local_x, last_player_local_y = None, None
-        last_chunk_x, last_chunk_y = None, None
+        # Boss glitch filtering
+        last_boss_x, last_boss_y = None, None
+        GLITCH_THRESHOLD = 15.0
 
-        # Track last computed global coords for fallback jump detection
-        last_computed_global_x, last_computed_global_y = None, None
 
-        # Track last valid NPC coords for outlier filtering
-        last_valid_boss_x, last_valid_boss_y = None, None
-        NPC_JUMP_THRESHOLD = 20.0  # If NPC jumps more than this without chunk change, it's a glitch
 
-        # Thresholds for detecting tile boundary jumps
-        LOCAL_JUMP_THRESHOLD = 25.0  # Local coords jump ~32 at boundary
-        GLOBAL_JUMP_THRESHOLD = 25.0  # If computed global jumps this much, it's a missed boundary
+
 
         # Continuous plot coordinates (separate from PathPoint storage)
         plot_player_xs, plot_player_ys = [], []
@@ -299,85 +306,25 @@ class PathTracer:
                     if any(v is None for v in positions.values()):
                         continue
 
-                    # Get current values
-                    curr_chunk_x = positions["chunk_x"]
-                    curr_chunk_y = positions["chunk_y"]
-                    curr_player_x = positions["hero_local_x"]
-                    curr_player_y = positions["hero_local_y"]
-                    curr_boss_x = positions["npc_global_x"]
-                    curr_boss_y = positions["npc_global_y"]
+                    # Player uses truly global coords
+                    player_global_x = positions["hero_global_x"]
+                    player_global_y = positions["hero_global_y"]
 
-                    # Filter NPC coordinate glitches (large jumps without chunk change)
-                    chunk_changed = False
+                    # Compute local→global transform using player's coords
+                    transform_x = positions["hero_global_x"] - positions["hero_local_x"]
+                    transform_y = positions["hero_global_y"] - positions["hero_local_y"]
 
-                    # Detect tile boundary crossing using multiple methods
-                    if last_chunk_x is not None:
-                        chunk_delta_x = curr_chunk_x - last_chunk_x
-                        chunk_delta_y = curr_chunk_y - last_chunk_y
-                        local_delta_x = curr_player_x - last_player_local_x
-                        local_delta_y = curr_player_y - last_player_local_y
+                    # Apply same transform to NPC local coords
+                    boss_global_x = positions["npc_local_x"] + transform_x
+                    boss_global_y = positions["npc_local_y"] + transform_y
 
-                        # Method 1: Detect by chunk change (primary method)
-                        if abs(chunk_delta_x) > 1.0:
-                            offset_x -= local_delta_x
-                            chunk_changed = True
-                            console.print(f"\n[yellow]Chunk X changed: {last_chunk_x:.1f} -> {curr_chunk_x:.1f}, local_delta={local_delta_x:.1f}, offset_x now {offset_x:.1f}[/yellow]")
-                        if abs(chunk_delta_y) > 1.0:
-                            offset_y -= local_delta_y
-                            chunk_changed = True
-                            console.print(f"\n[yellow]Chunk Y changed: {last_chunk_y:.1f} -> {curr_chunk_y:.1f}, local_delta={local_delta_y:.1f}, offset_y now {offset_y:.1f}[/yellow]")
-
-                        # Method 2: Fallback - detect by large local coord jump even if chunk didn't change
-                        # This catches cases where chunk update was missed in sampling
-                        if not chunk_changed and abs(local_delta_x) > LOCAL_JUMP_THRESHOLD:
-                            offset_x -= local_delta_x
-                            chunk_changed = True
-                            console.print(f"\n[magenta]Local X jump detected: {last_player_local_x:.1f} -> {curr_player_x:.1f}, offset_x now {offset_x:.1f}[/magenta]")
-                        if not chunk_changed and abs(local_delta_y) > LOCAL_JUMP_THRESHOLD:
-                            offset_y -= local_delta_y
-                            chunk_changed = True
-                            console.print(f"\n[magenta]Local Y jump detected: {last_player_local_y:.1f} -> {curr_player_y:.1f}, offset_y now {offset_y:.1f}[/magenta]")
-
-                    # Method 3: Final sanity check - detect by computed global position jump
-                    # This catches any remaining missed boundaries
-                    if last_computed_global_x is not None and not chunk_changed:
-                        test_global_x = curr_player_x + offset_x
-                        test_global_y = curr_player_y + offset_y
-                        global_delta_x = test_global_x - last_computed_global_x
-                        global_delta_y = test_global_y - last_computed_global_y
-
-                        if abs(global_delta_x) > GLOBAL_JUMP_THRESHOLD:
-                            offset_x -= global_delta_x
-                            chunk_changed = True
-                            console.print(f"\n[red]Global X discontinuity: jump of {global_delta_x:.1f}, correcting offset_x to {offset_x:.1f}[/red]")
-                        if abs(global_delta_y) > GLOBAL_JUMP_THRESHOLD:
-                            offset_y -= global_delta_y
-                            chunk_changed = True
-                            console.print(f"\n[red]Global Y discontinuity: jump of {global_delta_y:.1f}, correcting offset_y to {offset_y:.1f}[/red]")
-
-                    # Filter NPC glitches: if NPC jumped too much without chunk change, use last valid
-                    if last_valid_boss_x is not None and not chunk_changed:
-                        boss_delta_x = abs(curr_boss_x - last_valid_boss_x)
-                        boss_delta_y = abs(curr_boss_y - last_valid_boss_y)
-                        if boss_delta_x > NPC_JUMP_THRESHOLD or boss_delta_y > NPC_JUMP_THRESHOLD:
-                            # Glitch detected, use last valid values
-                            curr_boss_x = last_valid_boss_x
-                            curr_boss_y = last_valid_boss_y
-
-                    # Update last valid NPC coords
-                    last_valid_boss_x, last_valid_boss_y = curr_boss_x, curr_boss_y
-
-                    last_chunk_x, last_chunk_y = curr_chunk_x, curr_chunk_y
-                    last_player_local_x, last_player_local_y = curr_player_x, curr_player_y
-
-                    # Compute continuous global positions (shared offset for both)
-                    player_global_x = curr_player_x + offset_x
-                    player_global_y = curr_player_y + offset_y
-
-                    # Update last computed global for Method 3 sanity check
-                    last_computed_global_x, last_computed_global_y = player_global_x, player_global_y
-                    boss_global_x = curr_boss_x + offset_x
-                    boss_global_y = curr_boss_y + offset_y
+                    # Filter boss glitches: if jumped too much, use last valid
+                    if last_boss_x is not None:
+                        if abs(boss_global_x - last_boss_x) > GLITCH_THRESHOLD:
+                            boss_global_x = last_boss_x
+                        if abs(boss_global_y - last_boss_y) > GLITCH_THRESHOLD:
+                            boss_global_y = last_boss_y
+                    last_boss_x, last_boss_y = boss_global_x, boss_global_y
 
                     # Append to plot lists (swap X/Y, flip X axis only)
                     plot_player_xs.append(player_global_y)
@@ -390,10 +337,10 @@ class PathTracer:
                         timestamp=timestamp,
                         global_x=player_global_x,
                         global_y=player_global_y,
-                        chunk_x=positions["chunk_x"],
-                        chunk_y=positions["chunk_y"],
-                        local_x=positions["hero_local_x"],
-                        local_y=positions["hero_local_y"],
+                        chunk_x=0,
+                        chunk_y=0,
+                        local_x=player_global_x,
+                        local_y=player_global_y,
                     )
                     path_data.player_path.append(player_point)
 
@@ -402,10 +349,10 @@ class PathTracer:
                         timestamp=timestamp,
                         global_x=boss_global_x,
                         global_y=boss_global_y,
-                        chunk_x=positions["chunk_x"],
-                        chunk_y=positions["chunk_y"],
-                        local_x=positions["npc_global_x"],
-                        local_y=positions["npc_global_y"],
+                        chunk_x=0,
+                        chunk_y=0,
+                        local_x=boss_global_x,
+                        local_y=boss_global_y,
                     )
                     path_data.boss_path.append(boss_point)
 
@@ -466,8 +413,7 @@ class PathTracer:
                         console.print(
                             f"[dim]t={timestamp:6.1f}s | "
                             f"Player: ({plot_player_xs[-1]:8.2f}, {plot_player_ys[-1]:8.2f}) | "
-                            f"Boss: ({plot_boss_xs[-1]:8.2f}, {plot_boss_ys[-1]:8.2f}) | "
-                            f"Chunk: ({curr_chunk_x:.0f}, {curr_chunk_y:.0f})[/dim]",
+                            f"Boss: ({plot_boss_xs[-1]:8.2f}, {plot_boss_ys[-1]:8.2f})[/dim]",
                             end="\r"
                         )
 
@@ -476,6 +422,12 @@ class PathTracer:
 
         except KeyboardInterrupt:
             console.print("\n[yellow]Tracing stopped by user[/yellow]")
+        finally:
+            # Unfreeze boss if it was frozen
+            if freeze_boss:
+                console.print("[cyan]Unfreezing boss...[/cyan]")
+                self.set_attribute("NpcNoMove", False, "bool")
+                self.set_attribute("NpcNoAttack", False, "bool")
 
         # Close live plot
         if live_plot and fig is not None:
@@ -750,6 +702,10 @@ def main():
         help="Arena boundary JSON file (shows distances in live plot)"
     )
     trace_parser.add_argument(
+        "--freeze-boss", action="store_true",
+        help="Disable boss movement and attacks during tracing"
+    )
+    trace_parser.add_argument(
         "--visualize", action="store_true",
         help="Generate visualization after tracing"
     )
@@ -802,6 +758,7 @@ def main():
                     show_live=not args.quiet,
                     live_plot=args.live_plot,
                     arena_boundary=args.arena_boundary,
+                    freeze_boss=args.freeze_boss,
                 )
 
                 if args.visualize:

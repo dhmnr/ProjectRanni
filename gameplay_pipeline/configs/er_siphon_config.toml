@@ -156,24 +156,6 @@ pattern = "48 8B 48 08 49 89 8D"
 offsets = [0x190, 0x68, 0x78]
 type = "float"
 
-[attributes.NpcMapRelX]
-method = "dll"
-pattern = "48 8B 48 08 49 89 8D"
-offsets = [0x6C0]
-type = "float"
-
-[attributes.NpcMapRelZ]
-method = "dll"
-pattern = "48 8B 48 08 49 89 8D"
-offsets = [0x6C4]
-type = "float"
-
-[attributes.NpcMapRelY]
-method = "dll"
-pattern = "48 8B 48 08 49 89 8D"
-offsets = [0x6C8]
-type = "float"
-
 [attributes.NpcGlobalPosAngle]
 method = "dll"
 pattern = "48 8B 48 08 49 89 8D"
