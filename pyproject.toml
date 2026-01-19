@@ -18,7 +18,7 @@ yt_data_pipeline = [
     "yt-dlp>=2025.10.22",
 ]
 gameplay_pipeline = [
-    "pysiphon>=1.0.3",
+    "pysiphon>=1.2.0",
     "pillow>=12.0.0",
     "rich>=13.0.0",
     "huggingface-hub>=1.0.1",
