@@ -188,6 +188,54 @@ class ArenaBoundary:
         """Get signed distance to boundary (negative = inside)."""
         return float(self._sdf_interp([[x, y]])[0])
 
+    def get_sdf_normal(self, x: float, y: float) -> Tuple[float, float]:
+        """
+        Get the SDF gradient normal at a point.
+
+        The normal points in the direction of increasing SDF (towards outside).
+        For a point inside the arena, this points towards the nearest boundary.
+
+        Args:
+            x: X coordinate
+            y: Y coordinate
+
+        Returns:
+            Tuple of (normal_x, normal_y), normalized to unit length
+        """
+        # Compute gradient using finite differences
+        eps = self.resolution
+        sdf_px = float(self._sdf_interp([[x + eps, y]])[0])
+        sdf_mx = float(self._sdf_interp([[x - eps, y]])[0])
+        sdf_py = float(self._sdf_interp([[x, y + eps]])[0])
+        sdf_my = float(self._sdf_interp([[x, y - eps]])[0])
+
+        grad_x = (sdf_px - sdf_mx) / (2 * eps)
+        grad_y = (sdf_py - sdf_my) / (2 * eps)
+
+        # Normalize to unit vector
+        mag = np.sqrt(grad_x * grad_x + grad_y * grad_y)
+        if mag > 1e-6:
+            return (grad_x / mag, grad_y / mag)
+        else:
+            return (0.0, 0.0)
+
+    def query_sdf(self, x: float, y: float) -> Tuple[float, float, float]:
+        """
+        Query SDF value and normal in one call.
+
+        Args:
+            x: X coordinate
+            y: Y coordinate
+
+        Returns:
+            Tuple of (sdf_value, normal_x, normal_y)
+            - sdf_value: negative inside, positive outside
+            - normal_x, normal_y: unit vector pointing towards boundary
+        """
+        sdf_value = self.nearest_distance(x, y)
+        normal_x, normal_y = self.get_sdf_normal(x, y)
+        return (sdf_value, normal_x, normal_y)
+
     def save(self, path: str):
         """Save boundary to file."""
         data = {
