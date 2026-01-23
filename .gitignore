@@ -226,3 +226,4 @@ wandb/
 
 checkpoints/
 logs/
+recordings_old/
