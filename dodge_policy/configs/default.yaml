@@ -1,0 +1,87 @@
+# Dodge Policy PPO Training Configuration
+
+# Experiment settings
+exp_name: "dodge_ppo"
+seed: 42
+
+# Logging
+log_dir: "logs"
+
+# Wandb configuration
+track: true
+wandb_project: "ProjectRanni-DodgePolicy"
+wandb_entity: "dhmnr-projects"
+
+# Checkpointing
+checkpoint_dir: "checkpoints"
+save_freq: 10
+resume_from: null
+
+# Dodge window model (learned from human demonstrations)
+dodge_window_model: "dodge_windows.json"  # Path to model JSON, null to disable
+dodge_window_reward: 2.0                   # Reward scale for dodging in window
+
+# PPO hyperparameters
+ppo:
+  # Environment interaction
+  num_envs: 1
+  num_steps: 4096
+  total_timesteps: 1_000_000
+
+  # Learning
+  learning_rate: 0.0001
+  gamma: 0.99
+  gae_lambda: 0.95
+
+  # PPO-specific
+  clip_eps: 0.2
+  clip_vloss: true
+  ent_coef: 0.01
+  vf_coef: 0.5
+  max_grad_norm: 0.5
+
+  # Training
+  update_epochs: 4
+  num_minibatches: 4
+  normalize_advantages: true
+
+  # Network architecture
+  hidden_dims: [256, 256]
+
+  # Logging intervals
+  log_interval: 1
+  save_interval: 10
+  eval_interval: 10
+
+# Environment configuration
+env:
+  env_id: "Margit-v0"
+  host: "192.168.48.1:50051"
+  launch_game: false
+  save_file_name: "ER0000.Margit-v0.sl2"
+  save_file_dir: "C:\\Users\\DM\\AppData\\Roaming\\EldenRing\\76561198217475593"
+  # Arena boundary
+  boundary_path: "paths/margit_arena_boundary.json"
+  soft_margin: 5.0
+  hard_margin: 0.5
+
+  # Reward shaping penalties
+  hit_penalty: -1.0
+  dodge_penalty: -0.005
+  danger_zone_penalty: 0.0
+  oob_penalty: 0.0
+
+  # Engagement reward (stay close to boss)
+  engage_reward: 0.02
+  engage_distance: 8.0
+  disengage_penalty: 0.0
+
+  # HP management
+  refund_player_hp: true
+  refund_boss_hp: false
+
+  # Visualization
+  live_plot: false
+  # 4K screen (3840x2160) top-right quadrant: x=1920, y=0, size=1920x1080
+  plot_position: [1920, 0]
+  plot_size: [18.0, 10.0]  # ~1800x1000 pixels at 100 DPI
