@@ -4,7 +4,9 @@ version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.10"
-dependencies = []
+dependencies = [
+    "jax[cuda12]>=0.5.3",
+]
 
 [dependency-groups]
 yt_data_pipeline = [
@@ -45,7 +47,7 @@ bc_training = [
     "numpy>=2.0",
 ]
 bc_eval = [
-    "eldengym>=0.5.0",
+    "eldengym>=0.6.0",
     "jax>=0.4.26",  # 0.4.26+ supports numpy 2.0
     "jaxlib>=0.4.26",
     "flax>=0.8.0",
@@ -56,10 +58,21 @@ bc_eval = [
     "numpy>=2.0",  # Match eldengym's numpy version
     "opencv-python>=4.8.0,<5.0",
 ]
+dodge_policy = [
+    "eldengym>=0.6.0",
+    "jax>=0.4.26",
+    "jaxlib>=0.4.26",
+    "flax>=0.8.0",
+    "optax>=0.1.9",
+    "pyyaml>=6.0",
+    "numpy>=2.0",
+    "rich>=13.0.0",
+    "wandb>=0.16.0",
+]
 dev = [
     "ipykernel>=7.1.0",
     "ipywidgets>=8.1.8",
 ]
 
 [tool.uv]
-default-groups = ["yt_data_pipeline", "gameplay_pipeline", "bc_training", "bc_eval", "dev"]
+default-groups = ["yt_data_pipeline", "gameplay_pipeline", "bc_training", "bc_eval", "dodge_policy", "dev"]
