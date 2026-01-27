@@ -227,3 +227,19 @@ wandb/
 checkpoints/
 logs/
 recordings_old/
+
+# Training data
+rudder_data/
+rudder_data_v2/
+rudder_model/
+expert_data/
+
+# Trained models (generated artifacts)
+*.pt
+*.npz
+
+# Visualizations (generated)
+*.png
+
+# Dodge window data (can be regenerated)
+dodge_windows*.json
