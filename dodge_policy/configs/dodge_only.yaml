@@ -14,14 +14,21 @@ wandb_entity: "dhmnr-projects"
 checkpoint_dir: "checkpoints"
 save_freq: 10
 
-# Dodge window model
-dodge_window_model: "dodge_windows.json"
-dodge_window_reward: 2.0
+# Dodge window model for reward shaping
+dodge_window_model: "dodge_windows_expert.json"
+dodge_window_reward: 2.0  # Reward for dodging in correct window
+
+# World model for reward shaping (P(hit) based)
+world_model: "world_model_v2.npz"
+world_model_danger_penalty: -1.0    # Penalty for being in high P(hit) state without dodging
+world_model_dodge_bonus: 1.0        # Bonus for dodging when it reduces P(hit)
+world_model_danger_threshold: 0.3   # P(hit) above this is "dangerous"
+world_model_dodge_benefit_threshold: 0.05  # Minimum P(hit) reduction to reward dodge
 
 # Training hyperparameters
 num_steps: 2048
-total_timesteps: 1_000_000
-learning_rate: 0.0008
+total_timesteps: 500_000
+learning_rate: 0.001
 gamma: 0.99
 gae_lambda: 0.95
 
@@ -31,10 +38,10 @@ ent_coef: 0.01
 vf_coef: 0.5
 max_grad_norm: 0.5
 update_epochs: 8
-num_minibatches: 4
+num_minibatches: 8
 
 # Network
-hidden_dim: 128
+hidden_dim: 256
 anim_embed_dim: 32
 
 # Environment

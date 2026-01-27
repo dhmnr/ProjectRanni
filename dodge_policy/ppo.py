@@ -112,11 +112,13 @@ class RolloutBuffer:
         num_envs: int,
         obs_shape: Tuple[int, ...],
         num_actions: int,
+        store_rudder_data: bool = False,
     ):
         self.num_steps = num_steps
         self.num_envs = num_envs
         self.obs_shape = obs_shape
         self.num_actions = num_actions
+        self.store_rudder_data = store_rudder_data
         self.ptr = 0
 
         # Pre-allocate buffers
@@ -127,6 +129,15 @@ class RolloutBuffer:
         self.dones = np.zeros((num_steps, num_envs), dtype=np.float32)
         self.values = np.zeros((num_steps, num_envs), dtype=np.float32)
 
+        # Extra buffers for RUDDER (raw obs data before preprocessing)
+        if store_rudder_data:
+            self.boss_anim_ids = np.zeros((num_steps, num_envs), dtype=np.int32)
+            self.hero_anim_ids = np.zeros((num_steps, num_envs), dtype=np.int32)
+            self.dist_to_boss = np.zeros((num_steps, num_envs), dtype=np.float32)
+            self.hero_hp = np.zeros((num_steps, num_envs), dtype=np.float32)
+            self.dodge_actions = np.zeros((num_steps, num_envs), dtype=np.float32)
+            self.damage_taken = np.zeros((num_steps, num_envs), dtype=np.float32)
+
     def add(
         self,
         obs: np.ndarray,
@@ -135,6 +146,7 @@ class RolloutBuffer:
         reward: np.ndarray,
         done: np.ndarray,
         value: np.ndarray,
+        rudder_data: Optional[dict] = None,
     ):
         """Add a transition to the buffer."""
         self.obs[self.ptr] = obs
@@ -143,6 +155,16 @@ class RolloutBuffer:
         self.rewards[self.ptr] = reward
         self.dones[self.ptr] = done
         self.values[self.ptr] = value
+
+        # Store RUDDER data if provided
+        if self.store_rudder_data and rudder_data is not None:
+            self.boss_anim_ids[self.ptr] = rudder_data['boss_anim_id']
+            self.hero_anim_ids[self.ptr] = rudder_data['hero_anim_id']
+            self.dist_to_boss[self.ptr] = rudder_data['dist_to_boss']
+            self.hero_hp[self.ptr] = rudder_data['hero_hp']
+            self.dodge_actions[self.ptr] = rudder_data['dodge_action']
+            self.damage_taken[self.ptr] = rudder_data['damage_taken']
+
         self.ptr += 1
 
     def reset(self):
@@ -410,6 +432,9 @@ class PPOTrainer:
         env_config=None,
         dodge_window_model: Optional[DodgeWindowModel] = None,
         dodge_window_reward: float = 1.0,
+        player_dodge_anim_min: int = 0,
+        player_dodge_anim_max: int = 999,
+        rudder_shaper=None,
     ):
         """Initialize PPO trainer.
 
@@ -425,6 +450,9 @@ class PPOTrainer:
             env_config: Environment config (for engagement rewards)
             dodge_window_model: Optional learned dodge timing model
             dodge_window_reward: Reward scale for dodging in window (default 1.0)
+            player_dodge_anim_min: Min HeroAnimId for dodge detection
+            player_dodge_anim_max: Max HeroAnimId for dodge detection
+            rudder_shaper: Optional RudderRewardShaper for online credit assignment
         """
         self.config = config
         self.agent = agent
@@ -435,13 +463,17 @@ class PPOTrainer:
         self.env_config = env_config
         self.dodge_window_model = dodge_window_model
         self.dodge_window_reward = dodge_window_reward
+        self.player_dodge_anim_min = player_dodge_anim_min
+        self.player_dodge_anim_max = player_dodge_anim_max
+        self.rudder_shaper = rudder_shaper
 
-        # Create rollout buffer
+        # Create rollout buffer (with RUDDER data storage if enabled)
         self.buffer = RolloutBuffer(
             num_steps=config.num_steps,
             num_envs=config.num_envs,
             obs_shape=obs_shape,
             num_actions=num_actions,
+            store_rudder_data=(rudder_shaper is not None),
         )
 
         # Tracking
@@ -599,6 +631,7 @@ class PPOTrainer:
         ep_hits = 0
         ep_dodges = 0
         ep_good_dodges = 0  # Dodges in window
+        prev_player_dodging = False  # Track for dodge animation onset
 
         for step in range(self.config.num_steps):
             self._rollout_step = step + 1
@@ -650,10 +683,14 @@ class PPOTrainer:
             if info.get("player_damage_taken", 0) > 0:
                 ep_hits += 1
 
-            # Dodge window reward shaping
-            if action[4] > 0:  # Dodge action (index 4)
+            # Detect actual dodge from player animation (not key press)
+            player_anim = int(obs_dict.get('HeroAnimId', 0))
+            player_dodging = (self.player_dodge_anim_min <= player_anim <= self.player_dodge_anim_max)
+            dodge_onset = player_dodging and not prev_player_dodging
+
+            if dodge_onset:
                 ep_dodges += 1
-                # Check if dodge is in learned window
+                # Dodge window reward shaping
                 if self.dodge_window_model is not None:
                     anim_idx = int(obs[IDX_ANIM_ID])
                     elapsed_frames = float(obs[IDX_ELAPSED])
@@ -664,6 +701,7 @@ class PPOTrainer:
                         reward += self.dodge_window_reward * window_reward
                         ep_good_dodges += 1
 
+            prev_player_dodging = player_dodging
             ep_reward += reward
 
             # Update live obs plot
@@ -673,6 +711,20 @@ class PPOTrainer:
             if update_display is not None and step % 20 == 0:
                 update_display()
 
+            # Prepare RUDDER data if enabled
+            rudder_data = None
+            if self.rudder_shaper is not None:
+                # Extract dodge action (index 4 in MultiBinary action space)
+                dodge_action = float(action[4]) if len(action) > 4 else float(action[0])
+                rudder_data = {
+                    'boss_anim_id': int(obs_dict.get('boss_anim_id', 0)),
+                    'hero_anim_id': int(obs_dict.get('HeroAnimId', 0)),
+                    'dist_to_boss': float(obs_dict.get('dist_to_boss', 0)),
+                    'hero_hp': float(obs_dict.get('HeroHp', 0)),
+                    'dodge_action': dodge_action,
+                    'damage_taken': float(info.get('player_damage_taken', 0)),
+                }
+
             # Store transition (use next_done for this transition!)
             self.buffer.add(
                 obs=obs.reshape(1, -1),
@@ -681,6 +733,7 @@ class PPOTrainer:
                 reward=np.array([reward]),
                 done=np.array([float(next_done)]),
                 value=np.array([value]),
+                rudder_data=rudder_data,
             )
 
             # Update for next iteration
@@ -692,6 +745,7 @@ class PPOTrainer:
                 # Natural episode end (rare with HP refund)
                 obs_dict, _ = self.env.reset()
                 obs = self._flatten_obs(obs_dict)
+                prev_player_dodging = False
 
         # Count each rollout as an episode (since env doesn't naturally terminate)
         self._episodes += 1
@@ -700,6 +754,10 @@ class PPOTrainer:
         self._hits = ep_hits              # Per-episode hits
         self._dodges = ep_dodges          # Per-episode dodges
         self._good_dodges = ep_good_dodges  # Per-episode dodges in window
+
+        # Compute RUDDER credit and add to rewards
+        if self.rudder_shaper is not None:
+            self._apply_rudder_credit()
 
         # Get value estimate for final state
         obs_batch = jnp.array(obs).reshape(1, -1)
@@ -714,6 +772,60 @@ class PPOTrainer:
         last_value = np.array(last_value)
 
         return last_value, np.array([float(last_done)])
+
+    def _apply_rudder_credit(self):
+        """Compute RUDDER credit and add to buffer rewards."""
+        if self.rudder_shaper is None:
+            return
+
+        # For single env (num_envs=1), flatten the data
+        num_steps = self.buffer.ptr
+        boss_anim_ids = self.buffer.boss_anim_ids[:num_steps, 0]
+        hero_anim_ids = self.buffer.hero_anim_ids[:num_steps, 0]
+        dist_to_boss = self.buffer.dist_to_boss[:num_steps, 0]
+        hero_hp = self.buffer.hero_hp[:num_steps, 0]
+        dodge_actions = self.buffer.dodge_actions[:num_steps, 0]
+        damage_taken = self.buffer.damage_taken[:num_steps, 0]
+
+        # Compute credit
+        credit = self.rudder_shaper.compute_credit(
+            boss_anim_ids=boss_anim_ids,
+            hero_anim_ids=hero_anim_ids,
+            dist_to_boss=dist_to_boss,
+            hero_hp=hero_hp,
+            actions=dodge_actions,
+            damage_taken=damage_taken,
+        )
+
+        # Add credit to rewards (credit is already scaled in compute_credit)
+        self.buffer.rewards[:num_steps, 0] += credit
+
+        # Add data to RUDDER buffer for online training
+        self.rudder_shaper.add_to_buffer(
+            boss_anim_ids=boss_anim_ids,
+            hero_anim_ids=hero_anim_ids,
+            dist_to_boss=dist_to_boss,
+            hero_hp=hero_hp,
+            actions=dodge_actions,
+            damage_taken=damage_taken,
+        )
+
+        # Track RUDDER credit stats
+        self._rudder_credit_mean = float(credit.mean())
+        self._rudder_credit_std = float(credit.std())
+
+    def update_rudder(self) -> dict:
+        """Update RUDDER model with collected data.
+
+        Call this periodically (e.g., every N rollouts) to update the RUDDER model.
+
+        Returns:
+            info: RUDDER training metrics
+        """
+        if self.rudder_shaper is None:
+            return {}
+
+        return self.rudder_shaper.update_model()
 
     def update(self, returns: np.ndarray, advantages: np.ndarray) -> dict:
         """Perform PPO update.
@@ -888,9 +1000,13 @@ class PPOTrainer:
                 "Hits/ep:", f"[red]{current_stats['hits']}[/red]",
                 "Dodges/ep:", f"{current_stats['dodges']}",
             )
+            good_ratio = (
+                current_stats['good_dodges'] / current_stats['dodges']
+                if current_stats['dodges'] > 0 else 0.0
+            )
             table.add_row(
                 "Good dodges:", f"[green]{current_stats['good_dodges']}[/green]",
-                "", "",
+                "Good ratio:", f"[green]{good_ratio:.1%}[/green]",
             )
             return table
 
@@ -951,12 +1067,17 @@ class PPOTrainer:
                 # Wandb logging (per episode = per update)
                 if wandb_run is not None:
                     ep_reward = self._ep_rewards[-1] if self._ep_rewards else 0.0
-                    wandb_run.log({
+                    # Compute good dodge ratio (avoid division by zero)
+                    good_dodge_ratio = (
+                        self._good_dodges / self._dodges if self._dodges > 0 else 0.0
+                    )
+                    log_dict = {
                         # Episode metrics (primary)
                         "episode/reward": ep_reward,
                         "episode/hits": self._hits,
                         "episode/dodges": self._dodges,
                         "episode/good_dodges": self._good_dodges,
+                        "episode/good_dodge_ratio": good_dodge_ratio,
                         # Training diagnostics
                         "train/gae_return_mean": float(returns.mean()),
                         # Losses
@@ -968,7 +1089,12 @@ class PPOTrainer:
                         # Value estimates
                         "value/mean": float(self.buffer.values.mean()),
                         "value/std": float(self.buffer.values.std()),
-                    }, step=self._episodes)
+                    }
+                    # Add RUDDER credit stats if available
+                    if hasattr(self, '_rudder_credit_mean'):
+                        log_dict["rudder/credit_mean"] = self._rudder_credit_mean
+                        log_dict["rudder/credit_std"] = self._rudder_credit_std
+                    wandb_run.log(log_dict, step=self.update_count)
 
                 if callback is not None:
                     callback(info)

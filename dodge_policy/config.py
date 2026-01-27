@@ -67,6 +67,16 @@ class TrainConfig:
     dodge_window_model: Optional[str] = None  # Path to model JSON
     dodge_window_reward: float = 1.0          # Reward scale for dodging in window
 
+    # Player dodge animation detection (HeroAnimId range for dodge/roll)
+    player_dodge_anim_min: int = 0
+    player_dodge_anim_max: int = 999
+
+    # RUDDER reward shaping (online credit assignment)
+    rudder_model: Optional[str] = None  # Path to pre-trained RUDDER model
+    rudder_credit_scale: float = 1.0    # Scale factor for RUDDER credit
+    rudder_update_freq: int = 5         # Update RUDDER every N rollouts
+    rudder_save_freq: int = 50          # Save RUDDER model every N updates
+
 
 def _update_dataclass(dc: Any, updates: Dict[str, Any]) -> None:
     """Update dataclass fields from dictionary."""

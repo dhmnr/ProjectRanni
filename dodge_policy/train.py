@@ -15,6 +15,7 @@ from .ppo import PPOTrainer, NUM_CONTINUOUS, ANIM_VOCAB_SIZE
 from .config import load_config, save_config, TrainConfig
 from .env_factory import make_env, get_obs_shape, get_num_actions
 from .dodge_window_model import DodgeWindowModel
+from .rudder_reward import RudderRewardShaper, RudderRewardConfig
 
 
 def train(config: TrainConfig):
@@ -79,6 +80,19 @@ def train(config: TrainConfig):
         dodge_window_model = DodgeWindowModel.load(config.dodge_window_model)
         print(f"  Dodge window reward scale: {config.dodge_window_reward}")
 
+    # Load RUDDER reward shaper if provided
+    rudder_shaper = None
+    if config.rudder_model:
+        print(f"\nLoading RUDDER reward shaper...")
+        rudder_config = RudderRewardConfig(
+            model_path=config.rudder_model,
+            credit_scale=config.rudder_credit_scale,
+            update_freq=config.rudder_update_freq,
+        )
+        rudder_shaper = RudderRewardShaper(rudder_config)
+        print(f"  Credit scale: {config.rudder_credit_scale}")
+        print(f"  Update frequency: every {config.rudder_update_freq} rollouts")
+
     # Create trainer
     print("\nCreating trainer...")
     key, trainer_key = jax.random.split(key)
@@ -94,6 +108,9 @@ def train(config: TrainConfig):
         env_config=config.env,
         dodge_window_model=dodge_window_model,
         dodge_window_reward=config.dodge_window_reward,
+        player_dodge_anim_min=config.player_dodge_anim_min,
+        player_dodge_anim_max=config.player_dodge_anim_max,
+        rudder_shaper=rudder_shaper,
     )
 
     # Training info
@@ -158,6 +175,42 @@ def train(config: TrainConfig):
                 update=update,
             )
 
+        # Update RUDDER model periodically
+        if rudder_shaper is not None and update % config.rudder_update_freq == 0:
+            rudder_info = trainer.update_rudder()
+            buffer_size = rudder_info.get('rudder_buffer_size', 0)
+
+            if rudder_info.get('rudder_loss', 0) > 0:
+                print(f"  RUDDER update: loss={rudder_info['rudder_loss']:.4f}, "
+                      f"trajectories={rudder_info['rudder_trajectories']}, "
+                      f"buffer={buffer_size}")
+            else:
+                print(f"  RUDDER buffer: {buffer_size} trajectories (need 8+ to update)")
+
+            # Log RUDDER metrics
+            if wandb_run is not None:
+                rudder_log = {
+                    'rudder/buffer_size': buffer_size,
+                }
+                if rudder_info.get('rudder_loss', 0) > 0:
+                    rudder_log['rudder/loss'] = rudder_info['rudder_loss']
+                    rudder_log['rudder/trajectories'] = rudder_info['rudder_trajectories']
+
+                # Compute alignment metrics
+                alignment_metrics = rudder_shaper.compute_gt_alignment(
+                    data_dir="rudder_data",
+                    gt_model_path=config.dodge_window_model or "dodge_windows.json",
+                )
+                if alignment_metrics:
+                    rudder_log.update(alignment_metrics)
+
+                wandb_run.log(rudder_log, step=update)
+
+            # Save RUDDER model periodically (less frequent than visualization)
+            if update % config.rudder_save_freq == 0:
+                rudder_save_path = exp_dir / "rudder_model"
+                rudder_shaper.save(str(rudder_save_path))
+
     print("\nStarting training...\n")
 
     try:
@@ -173,6 +226,12 @@ def train(config: TrainConfig):
         )
         print(f"\nSaved final checkpoint: {final_path}")
 
+        # Save final RUDDER model
+        if rudder_shaper is not None:
+            rudder_save_path = exp_dir / "rudder_model_final"
+            rudder_shaper.save(str(rudder_save_path))
+            print(f"Saved final RUDDER model: {rudder_save_path}")
+
     except KeyboardInterrupt:
         print("\n\nTraining interrupted by user.")
         # Save interrupt checkpoint
@@ -184,6 +243,12 @@ def train(config: TrainConfig):
             update=trainer.update_count,
         )
         print(f"Saved interrupt checkpoint: {interrupt_path}")
+
+        # Save RUDDER model on interrupt
+        if rudder_shaper is not None:
+            rudder_save_path = exp_dir / "rudder_model_interrupt"
+            rudder_shaper.save(str(rudder_save_path))
+            print(f"Saved interrupt RUDDER model: {rudder_save_path}")
 
     finally:
         env.close()
@@ -236,6 +301,13 @@ def main():
     parser.add_argument("--dodge-window-reward", type=float, default=1.0,
                         help="Reward scale for dodging in window (default: 1.0)")
 
+    # RUDDER reward shaping
+    parser.add_argument("--rudder-model", type=str, help="Path to pre-trained RUDDER model")
+    parser.add_argument("--rudder-credit-scale", type=float, default=1.0,
+                        help="Scale factor for RUDDER credit (default: 1.0)")
+    parser.add_argument("--rudder-update-freq", type=int, default=5,
+                        help="Update RUDDER every N rollouts (default: 5)")
+
     args = parser.parse_args()
 
     # Load config
@@ -268,6 +340,14 @@ def main():
         config.dodge_window_model = args.dodge_window_model
     if args.dodge_window_reward != 1.0:  # Only override if explicitly set
         config.dodge_window_reward = args.dodge_window_reward
+
+    # RUDDER arguments
+    if args.rudder_model:
+        config.rudder_model = args.rudder_model
+    if args.rudder_credit_scale != 1.0:
+        config.rudder_credit_scale = args.rudder_credit_scale
+    if args.rudder_update_freq != 5:
+        config.rudder_update_freq = args.rudder_update_freq
 
     train(config)
 

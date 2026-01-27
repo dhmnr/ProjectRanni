@@ -18,15 +18,26 @@ save_freq: 10
 resume_from: null
 
 # Dodge window model (learned from human demonstrations)
-dodge_window_model: "dodge_windows.json"  # Path to model JSON, null to disable
-dodge_window_reward: 2.0                   # Reward scale for dodging in window
+dodge_window_model: "dodge_windows.json"  # For tracking good_dodges metric
+dodge_window_reward: 0.0  # No reward - using RUDDER instead
+
+# Player dodge animation detection (HeroAnimId range)
+# Roll animations are in 27000-28000 range
+player_dodge_anim_min: 27000
+player_dodge_anim_max: 28000
+
+# RUDDER reward shaping (online credit assignment)
+rudder_model: "rudder_model"  # Path to pre-trained RUDDER model, null to disable
+rudder_credit_scale: 4.0  # Scaled to match dodge_window_reward magnitude (~2.0 max)
+rudder_update_freq: 5  # Update RUDDER every N rollouts
+rudder_save_freq: 50  # Save RUDDER model every N updates
 
 # PPO hyperparameters
 ppo:
   # Environment interaction
   num_envs: 1
   num_steps: 4096
-  total_timesteps: 1_000_000
+  total_timesteps: 250_000  # ~16 hours at 2min/512steps
 
   # Learning
   learning_rate: 0.0001
@@ -67,7 +78,7 @@ env:
 
   # Reward shaping penalties
   hit_penalty: -1.0
-  dodge_penalty: -0.005
+  dodge_penalty: -0.05
   danger_zone_penalty: 0.0
   oob_penalty: 0.0
 
