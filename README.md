@@ -1,294 +1,284 @@
 # Project Ranni
 
-A comprehensive data pipeline for collecting and managing gameplay data from videos and live gameplay sessions.
+Training an RL agent to defeat Elden Ring bosses, starting with Margit the Fell Omen.
 
-## Overview
+## Goal
 
-This project consists of three main pipelines:
+Build an end-to-end system that can:
+1. Collect gameplay data from human demonstrations and random exploration
+2. Learn world models to understand boss attack patterns and timing
+3. Train RL policies with shaped rewards to master combat
 
-1. **YouTube Data Pipeline** (`yt_data_pipeline`) - Download, process, and extract data from gameplay videos
-2. **Gameplay Pipeline** (`gameplay_pipeline`) - Record live gameplay and upload to Hugging Face
-3. **BC Training** (`BC_training`) - Train behavior cloning models with JAX/Flax
+## Current Approach
 
-## Installation
+**Dodge-only policy**: The agent always walks toward the boss and only decides *when* to dodge. This simplifies the action space from complex movement + attack combos to a binary decision (dodge or not), making the credit assignment problem tractable.
 
-This project uses `uv` for dependency management. Install dependencies:
+**Reward shaping**: Raw RL rewards (survive = good, die = bad) are too sparse. We use multiple reward shaping techniques:
+- **Dodge window model**: Rewards dodging during the correct timing windows for each boss attack
+- **World model**: Predicts P(hit | state, action) to reward dodging when it actually reduces hit probability
+- **RUDDER**: Learns to redistribute episode returns to individual timesteps based on state-action patterns
 
-```bash
-# Install all dependencies
-uv sync
+## Architecture
 
-# Or install specific pipeline dependencies
-uv sync --group yt_data_pipeline
-uv sync --group gameplay_pipeline
-uv sync --group bc_training
 ```
-
-## YouTube Data Pipeline
-
-Process gameplay videos from YouTube or local sources.
-
-### Features
-
-- Download videos from YouTube using `yt-dlp`
-- Extract frames from videos
-- Detect game UI elements (HP, stamina, etc.) using OCR
-- Trim videos to specific segments
-- Export processed data to pickle/HDF5 format
-
-### Usage
-
-```bash
-# Run the full pipeline
-uv run -m yt_data_pipeline
+┌─────────────────────────────────────────────────────────────────────┐
+│                         Data Collection                              │
+├─────────────────────────────────────────────────────────────────────┤
+│  gameplay_pipeline/     Live recording via Siphon (memory reading)   │
+│  record_episode.py      Record human demonstrations                  │
+│  collect_rudder_data.py Collect random policy rollouts               │
+└─────────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│                         World Models                                 │
+├─────────────────────────────────────────────────────────────────────┤
+│  world_model.py         Predicts next state + P(hit) given action   │
+│  hit_predictor.py       Specialized hit probability predictor        │
+│  dodge_window_model.py  Gaussian timing windows per boss animation   │
+└─────────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│                        Reward Shaping                                │
+├─────────────────────────────────────────────────────────────────────┤
+│  world_model_reward.py  Shapes reward based on P(hit) predictions   │
+│  rudder_reward.py       LSTM-based credit assignment                 │
+│  dodge_window_model.py  Rewards correct dodge timing                 │
+└─────────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│                         RL Training                                  │
+├─────────────────────────────────────────────────────────────────────┤
+│  train_dodge_only.py    PPO training for dodge-only policy          │
+│  train.py               Full action space PPO training               │
+│  ppo.py                 Core PPO implementation (JAX/Flax)          │
+└─────────────────────────────────────────────────────────────────────┘
 ```
-
-Individual steps can be run separately - see the scripts in `yt_data_pipeline/`.
-
-## Gameplay Pipeline
-
-Record live gameplay using the [pysiphon](https://github.com/dhmnr/pysiphon) library and upload to Hugging Face.
-
-### Prerequisites
-
-1. **Siphon Server**: You need a running Siphon server that provides:
-   - Memory attribute access (health, position, etc.)
-   - Screen capture capabilities
-   - Input control (optional)
-
-2. **Configuration**: Create a `siphon_config.toml` file with your game's memory addresses and attributes. See `gameplay_pipeline/siphon_config.toml.example` for a template.
-
-### Features
-
-- Connect to Siphon server for game data access
-- Record gameplay sessions with:
-  - Video frames (screen capture)
-  - Game attributes (health, mana, position, etc.)
-  - Synchronized HDF5 output
-- Live preview of recording status
-- Automatic upload to Hugging Face datasets
-
-### Usage
-
-#### Test Connection and Capture
-
-```bash
-# Test that you can capture frames
-uv run -m gameplay_pipeline.record_gameplay \
-    --host localhost:50051 \
-    --config siphon_config.toml \
-    --attributes health,mana \
-    --test-capture
-```
-
-#### Record a Session
-
-```bash
-# Record 60 seconds of gameplay
-uv run -m gameplay_pipeline.record_gameplay \
-    --host localhost:50051 \
-    --config siphon_config.toml \
-    --attributes health,mana,stamina,position \
-    --duration 60 \
-    --output-dir ./recordings
-```
-
-#### Record and Upload to Hugging Face
-
-```bash
-# Record and automatically upload to HF
-uv run -m gameplay_pipeline.record_gameplay \
-    --host localhost:50051 \
-    --config siphon_config.toml \
-    --attributes health,mana,stamina,position \
-    --duration 300 \
-    --upload \
-    --repo-id username/my-gameplay-dataset \
-    --hf-token hf_xxx
-```
-
-### Command-Line Options
-
-- `--host` - Siphon server address (default: `localhost:50051`)
-- `--config` - Path to Siphon configuration file
-- `--attributes` - Comma-separated list of attributes to record (required)
-- `--output-dir` - Output directory for recordings (default: `./recordings`)
-- `--duration` - Maximum recording duration in seconds (default: 60)
-- `--no-preview` - Disable live attribute preview
-- `--test-capture` - Test frame capture and exit
-- `--upload` - Upload recording to Hugging Face after completion
-- `--repo-id` - Hugging Face repository ID (e.g., `username/repo-name`)
-- `--hf-token` - Hugging Face API token
-
-### Programmatic Usage
-
-```python
-from gameplay_pipeline.record_gameplay import GameplayRecorder
-from gameplay_pipeline.hf_upload import upload_to_huggingface
-
-# Record gameplay
-with GameplayRecorder(
-    host="localhost:50051",
-    config_path="siphon_config.toml"
-) as recorder:
-    # Test capture
-    recorder.test_capture("test.png")
-    
-    # Get current attribute values
-    attrs = recorder.get_attributes(["health", "mana"])
-    print(f"Current health: {attrs['health']}")
-    
-    # Record a session
-    result = recorder.record_session(
-        attribute_names=["health", "mana", "stamina"],
-        output_directory="./recordings",
-        max_duration_seconds=120,
-    )
-    
-    print(f"Recording saved to: {result['file_path']}")
-    print(f"Total frames: {result['stats']['total_frames']}")
-
-# Upload to Hugging Face
-upload_to_huggingface(
-    file_path=result['file_path'],
-    repo_id="username/my-dataset",
-    token="hf_xxx"
-)
-```
-
-## Hugging Face Upload
-
-Upload any file or folder to Hugging Face Hub:
-
-```bash
-# Upload a single file
-uv run -m gameplay_pipeline.hf_upload my_recording.h5 username/repo-name
-
-# Or use programmatically
-from gameplay_pipeline.hf_upload import upload_to_huggingface, upload_folder_to_huggingface
-
-# Upload file
-upload_to_huggingface(
-    file_path="recording.h5",
-    repo_id="username/my-dataset",
-    repo_type="dataset",
-    token="hf_xxx"
-)
-
-# Upload entire folder
-upload_folder_to_huggingface(
-    folder_path="./recordings",
-    repo_id="username/my-dataset",
-    path_in_repo="recordings/session1",
-    ignore_patterns=["*.tmp", "__pycache__"]
-)
-```
-
-## BC Training
-
-Train behavior cloning models to learn from recorded gameplay data.
-
-### Features
-
-- JAX/Flax-based deep learning pipeline
-- Pure CNN baseline (vision-only)
-- WandB integration for experiment tracking
-- Modular architecture for multiple model variants
-- Comprehensive evaluation metrics
-
-### Usage
-
-```bash
-# Train pure CNN baseline
-uv run -m BC_training --config configs/pure_cnn.yaml
-
-# Test setup
-uv run python BC_training/scripts/test_setup.py
-```
-
-See `BC_training/QUICKSTART.md` for detailed instructions.
 
 ## Project Structure
 
 ```
 ProjectRanni/
-├── yt_data_pipeline/          # YouTube video processing
-│   ├── download_videos.py     # Download from YouTube
-│   ├── extract_frames.py      # Extract video frames
-│   ├── hp_detection.py        # Detect UI elements
-│   ├── trim_videos.py         # Trim videos
-│   └── video_to_pickle.py     # Export to pickle/HDF5
-├── gameplay_pipeline/         # Live gameplay recording
-│   ├── record_gameplay.py     # Main recording script
-│   ├── hf_upload.py          # Hugging Face upload utilities
-│   └── siphon_config.toml.example  # Example configuration
-├── BC_training/               # Behavior cloning training
-│   ├── common/               # Shared utilities (dataset, metrics)
-│   ├── models/               # Model implementations
-│   ├── configs/              # Training configurations
-│   ├── train.py             # Main training script
-│   └── QUICKSTART.md        # Setup guide
-├── data/                      # Data storage
-│   └── videos/               # Downloaded and processed videos
-├── pyproject.toml            # Project dependencies
-└── README.md                 # This file
+├── dodge_policy/                 # Main RL training module
+│   ├── configs/                  # Training configurations
+│   │   ├── dodge_only.yaml      # Dodge-only policy config
+│   │   └── default.yaml         # Full policy config
+│   │
+│   ├── # World Models
+│   ├── world_model.py           # Dreamer-style world model (JAX)
+│   ├── world_model_reward.py    # P(hit)-based reward shaping
+│   ├── hit_predictor.py         # Hit probability predictor
+│   ├── dodge_window_model.py    # Timing window model
+│   │
+│   ├── # Reward Shaping
+│   ├── rudder_model.py          # RUDDER LSTM for credit assignment
+│   ├── rudder_reward.py         # RUDDER reward shaper integration
+│   │
+│   ├── # Training
+│   ├── train_dodge_only.py      # Dodge-only PPO training
+│   ├── train.py                 # Full action space training
+│   ├── ppo.py                   # PPO implementation
+│   ├── agent.py                 # Full action space agent
+│   ├── dodge_only_agent.py      # Dodge-only agent
+│   │
+│   ├── # Data Collection
+│   ├── collect_rudder_data.py   # Collect random policy data
+│   ├── record_episode.py        # Record human demonstrations
+│   ├── build_windows_from_expert.py  # Build dodge windows from demos
+│   │
+│   ├── # Environment
+│   ├── env_factory.py           # Environment creation
+│   ├── dodge_only_wrapper.py    # Simplifies to binary action
+│   ├── action_wrapper.py        # Action space utilities
+│   └── anim_vocab.json          # Boss animation vocabulary
+│
+├── gameplay_pipeline/            # Live gameplay recording
+│   ├── record_gameplay.py       # Record via Siphon
+│   └── hf_upload.py             # Upload to HuggingFace
+│
+├── BC_training/                  # Behavior cloning (JAX/Flax)
+│   ├── models/                  # CNN, transformer models
+│   └── train.py                 # BC training script
+│
+├── yt_data_pipeline/            # YouTube video processing
+│   └── ...                      # Download, extract, process
+│
+├── rudder_data_v2/              # Training data (225 episodes)
+├── expert_data/                 # Human demonstration data
+├── paths/                       # Arena boundary definitions
+└── checkpoints/                 # Saved model weights
 ```
 
-## Authentication
-
-### Hugging Face
-
-Set your Hugging Face token as an environment variable:
+## Installation
 
 ```bash
-# Windows PowerShell
-$env:HF_TOKEN = "hf_xxxxxxxxxxxxx"
+# Install uv if needed
+curl -LsSf https://astral.sh/uv/install.sh | sh
 
-# Windows CMD
-set HF_TOKEN=hf_xxxxxxxxxxxxx
+# Install dependencies
+uv sync
 
-# Linux/Mac
-export HF_TOKEN=hf_xxxxxxxxxxxxx
+# For GPU training (CUDA)
+uv sync --group dodge_policy
 ```
 
-Or pass it directly via `--hf-token` argument.
+## Quick Start
 
-## Output Format
+### 1. Collect Data
 
-Recordings are saved in HDF5 format (`.h5` files) with the following structure:
+```bash
+# Collect random policy episodes (for world model training)
+uv run python -m dodge_policy.collect_rudder_data \
+    --episodes 100 \
+    --dodge-prob 0.2 \
+    --output-dir rudder_data_v2
 
-- **frames**: Video frames captured during gameplay
-- **attributes**: Time-series data for each recorded attribute
-- **metadata**: Recording information (FPS, duration, etc.)
+# Record human demonstrations
+uv run python -m dodge_policy.record_episode \
+    --output-dir expert_data
+```
 
-You can read HDF5 files using:
+### 2. Train World Model
+
+```bash
+# Train world model on collected data
+uv run python -m dodge_policy.world_model \
+    --train \
+    --data-dir rudder_data_v2 \
+    --epochs 100 \
+    --output world_model_v2.npz
+```
+
+### 3. Build Dodge Windows
+
+```bash
+# From expert demonstrations
+uv run python -m dodge_policy.build_windows_from_expert \
+    --data-dir expert_data \
+    --output dodge_windows_expert.json
+```
+
+### 4. Train Dodge Policy
+
+```bash
+# Train with all reward shapers
+uv run python -m dodge_policy.train_dodge_only \
+    --config dodge_policy/configs/dodge_only.yaml \
+    --track  # Enable wandb logging
+```
+
+## Configuration
+
+Edit `dodge_policy/configs/dodge_only.yaml`:
+
+```yaml
+# Reward shaping
+dodge_window_model: "dodge_windows_expert.json"
+dodge_window_reward: 2.0
+
+world_model: "world_model_v2.npz"
+world_model_danger_penalty: -1.0
+world_model_dodge_bonus: 1.0
+
+# Training
+total_timesteps: 500_000
+learning_rate: 0.001
+num_steps: 2048
+
+# Environment
+env:
+  host: "192.168.48.1:50051"  # Siphon server
+  hit_penalty: -2.0
+  dodge_penalty: -0.5
+```
+
+## World Model
+
+The world model learns from random policy data to predict:
+- **Next boss animation** (94.6% accuracy)
+- **P(hit)** given state and action (86.7% accuracy)
+- **Distance changes** from player actions
+
+This enables reward shaping without human-labeled dodge windows:
 
 ```python
-import h5py
+from dodge_policy.world_model_reward import load_world_model_shaper
 
-with h5py.File("recording.h5", "r") as f:
-    frames = f["frames"][:]
-    health = f["attributes/health"][:]
-    metadata = dict(f.attrs)
+shaper = load_world_model_shaper("world_model_v2.npz")
+
+# Get reward shaping for a state-action
+reward, info = shaper.compute_reward_shaping(
+    anim_idx=15,        # Boss animation
+    elapsed_frames=30,   # Frames into animation
+    dist_to_boss=3.0,   # Distance
+    action=1,           # 1 = dodge
+)
+# reward > 0 if dodging reduces P(hit)
 ```
+
+## RUDDER Credit Assignment
+
+RUDDER learns to redistribute sparse episode returns to individual timesteps:
+
+```python
+from dodge_policy.rudder_reward import RudderRewardShaper, RudderRewardConfig
+
+config = RudderRewardConfig(credit_scale=4.0)
+shaper = RudderRewardShaper(config)
+
+# Compute per-step credit from episode data
+credit = shaper.compute_credit(
+    boss_anim_ids, hero_anim_ids, dist_to_boss,
+    hero_hp, actions, damage_taken
+)
+# credit[t] = contribution of timestep t to episode return
+```
+
+## Environment
+
+Requires [Siphon](https://github.com/dhmnr/pysiphon) server running on Windows with Elden Ring:
+
+```bash
+# On Windows (with Elden Ring running)
+siphon-server --config elden_ring.toml
+
+# On Linux (training)
+uv run python -m dodge_policy.train_dodge_only
+```
+
+The environment provides:
+- **Observations**: boss_anim_id, elapsed_frames, dist_to_boss, hero_hp, hero_anim_id
+- **Actions**: MultiBinary(5) for full, Discrete(2) for dodge-only
+- **Rewards**: Configurable penalties for hits, dodges, out-of-bounds
+
+## Results
+
+Current world model (trained on 225 episodes, 230k transitions):
+- Boss animation prediction: **94.6%** accuracy
+- Hit prediction: **86.7%** accuracy
+- Learns attack timing patterns from random exploration data
 
 ## Development
 
-This project uses:
-- **uv** for dependency management
-- **Python 3.10+** for type hints and modern features
-- **pysiphon** for gameplay data access
-- **huggingface-hub** for dataset uploads
-- **rich** for beautiful CLI output
+```bash
+# Run tests
+uv run pytest
+
+# Format code
+uv run ruff format .
+
+# Type check
+uv run pyright
+```
+
+## References
+
+- [RUDDER: Return Decomposition for Delayed Rewards](https://arxiv.org/abs/1806.07857)
+- [Dream to Control: Learning Behaviors by Latent Imagination](https://arxiv.org/abs/1912.01603) (Dreamer)
+- [Proximal Policy Optimization](https://arxiv.org/abs/1707.06347) (PPO)
 
 ## License
 
 See LICENSE file for details.
-
-## Contributing
-
-Contributions are welcome! Please ensure:
-- Code follows existing style
-- All features are documented
-- Dependencies are properly declared in `pyproject.toml`
-
