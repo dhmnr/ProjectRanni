@@ -1,0 +1,79 @@
+# Quick test config for RUDDER integration
+
+exp_name: "rudder_test"
+seed: 42
+
+# Logging
+log_dir: "logs"
+track: true
+wandb_project: "ProjectRanni-DodgePolicy"
+wandb_entity: "dhmnr-projects"
+
+# Checkpointing (frequent for testing)
+checkpoint_dir: "checkpoints"
+save_freq: 2
+resume_from: null
+
+# Dodge window model
+dodge_window_model: "dodge_windows.json"
+dodge_window_reward: 2.0
+
+# Player dodge animation detection (roll animations are in 27000-28000 range)
+player_dodge_anim_min: 27000
+player_dodge_anim_max: 28000
+
+# RUDDER reward shaping (frequent updates for testing)
+rudder_model: "rudder_model"
+rudder_credit_scale: 1.0
+rudder_update_freq: 1      # Update every rollout
+rudder_save_freq: 5        # Save every 5 updates
+
+# PPO hyperparameters (low for quick test)
+ppo:
+  num_envs: 1
+  num_steps: 512           # Short rollouts
+  total_timesteps: 5000    # Quick test
+
+  learning_rate: 0.0001
+  gamma: 0.99
+  gae_lambda: 0.95
+
+  clip_eps: 0.2
+  clip_vloss: true
+  ent_coef: 0.01
+  vf_coef: 0.5
+  max_grad_norm: 0.5
+
+  update_epochs: 2         # Fewer epochs
+  num_minibatches: 2
+  normalize_advantages: true
+
+  hidden_dims: [256, 256]
+
+  log_interval: 1
+  save_interval: 2
+  eval_interval: 2
+
+# Environment configuration
+env:
+  env_id: "Margit-v0"
+  host: "192.168.48.1:50051"
+  launch_game: false
+  save_file_name: "ER0000.Margit-v0.sl2"
+  save_file_dir: "C:\\Users\\DM\\AppData\\Roaming\\EldenRing\\76561198217475593"
+  boundary_path: "paths/margit_arena_boundary.json"
+  soft_margin: 5.0
+  hard_margin: 0.5
+
+  hit_penalty: -1.0
+  dodge_penalty: -0.005
+  danger_zone_penalty: 0.0
+  oob_penalty: 0.0
+
+  engage_reward: 0.02
+  engage_distance: 8.0
+  disengage_penalty: 0.0
+
+  refund_player_hp: true
+  refund_boss_hp: false
+  live_plot: false
